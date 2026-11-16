@@ -48,12 +48,17 @@ COMMIT=$(git -C "$W" rev-parse --short HEAD 2>/dev/null || echo unknown); git -C
 RID=$( { cat "$W"/{switchrecomp,codegen,a64,nxloader,metroid_perf}.py "$W/beyond/fov_hooks.txt" "$W/runtime/cpu.h" "$W/runtime/cpu_helpers.c" "$W/linux/lx_compat.h"
          [ -f "$W/beyond/beyond_patches.json" ] && cat "$W/beyond/beyond_patches.json"; echo "$GCC_SHA"; } | sha256sum | cut -c1-16)
 rm -f "$RUNTIME"   # so a failed build cannot leave the distro-built one in place
-SWR_RUNTIME_CC="$BGCC" SWR_RUNTIME_DEFS="-idirafter $SI -L$SL -Wl,--allow-shlib-undefined -DSWR_APPIMAGE_VERSION=\"$VERSION\" -DSWR_APPIMAGE_COMMIT=\"$COMMIT\" -DSWR_RECOMPILER_ID=\"$RID\"" SWR_RELEASE=1 \
+# GLIBC_MAX: what the runtime may need, the glibc of the oldest Ubuntu LTS still supported (22.04), which the AppImage
+# catalog tests on. The few functions the toolchain's glibc 2.41 gives newer versions go to the old ones (glibc_compat.c)
+GLIBC_MAX=GLIBC_2.35
+WRAP=$(printf -- '-Wl,--wrap=%s ' fmod fmodf arc4random __isoc23_strtol __isoc23_strtoll __isoc23_strtoul __isoc23_strtoull __isoc23_sscanf __isoc23_fscanf)
+SWR_RUNTIME_CC="$BGCC" SWR_RUNTIME_DEFS="-idirafter $SI -L$SL -Wl,--allow-shlib-undefined $W/linux/glibc_compat.c $WRAP -DSWR_APPIMAGE_VERSION=\"$VERSION\" -DSWR_APPIMAGE_COMMIT=\"$COMMIT\" -DSWR_RECOMPILER_ID=\"$RID\"" SWR_RELEASE=1 \
   bash "$W/linux/setup_and_build_runtime.sh" > /dev/null
-# what the player's machine needs: no CPU level above the baseline, no glibc newer than the toolchain's
+# what the player's machine needs: no CPU level above the baseline, no glibc newer than GLIBC_MAX
 readelf -n "$RUNTIME" | grep -q 'ISA needed:.*x86-64-v[234]' && { echo "error: the runtime needs a newer CPU than x86-64" >&2; exit 1; }
 G=$(objdump -T "$RUNTIME" | grep -o 'GLIBC_2\.[0-9]*' | sort -uV | tail -1)
-[ "$(printf '%s\nGLIBC_2.41\n' "$G" | sort -V | tail -1)" = GLIBC_2.41 ] || { echo "error: the runtime needs $G" >&2; exit 1; }
+[ "$(printf '%s\n%s\n' "$G" "$GLIBC_MAX" | sort -V | tail -1)" = "$GLIBC_MAX" ] || { echo "error: the runtime needs $G (at most $GLIBC_MAX):" >&2
+  objdump -T "$RUNTIME" | grep -E "GLIBC_2\.[0-9]+" | awk -v m="${GLIBC_MAX#GLIBC_2.}" '{v=$(NF-1); gsub(/[()]/,"",v); split(v,x,"."); if(x[2]+0>m+0) print "  " $NF " " v}' >&2; exit 1; }
 grep -qa "FIRST-TIME SETUP" "$RUNTIME" || { echo "error: the runtime was built without the front end (SWR_NO_LINUX_FRONTEND?)" >&2; exit 1; }
 
 rm -rf "$A"; mkdir -p "$A/usr/bin" "$R/beyond" "$R/runtime" "$R/linux" "$A/usr/share/metroid-prime-4-recomp/licenses"

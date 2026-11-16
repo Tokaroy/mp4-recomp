@@ -1,6 +1,6 @@
-# Metroid Prime 4 Recomp — native Linux build (AppImage)
+# Metroid Prime 4 Recomp
 
-A native PC build of **your own copy** of *Metroid Prime 4: Beyond* for Linux, packaged as a single AppImage. It is built
+A native Linux build of **your own copy** of *Metroid Prime 4: Beyond*, packaged as a single AppImage. It is built
 on the SwitchRecomp runtime by MZ Labs: the game's Switch code is recompiled ahead of time into a native Linux library on your machine, and the
 Switch GPU's work is translated to OpenGL 4.6.
 
