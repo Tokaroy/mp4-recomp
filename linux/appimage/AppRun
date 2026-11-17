@@ -1,20 +1,102 @@
 #!/bin/sh
-# Metroid Prime 4 Recomp AppImage: the game is installed outside the (read-only) AppImage, in MP4_RECOMP_HOME or
-# ~/.local/share/MetroidPrime4Recomp (METROID_BEYOND_HOME and ~/.local/share/MetroidBeyondRecomp from earlier builds:
-# the old variable still works, and the old default folder is moved to the new one once, a rename on the same drive). The runtime finds its .ini, _code.so and _data next to itself, so a copy of it lives
-# there, refreshed when this AppImage brings a different one. The Play / setup screen (beyond_ui/fe.cpp) gets the
-# recompiler, GCC and Python from inside the AppImage through SWR_RECOMPILER.
+# Metroid Prime 4 Recomp AppImage: the game is installed outside the (read-only) AppImage. Where, first match wins:
+#   MP4_RECOMP_HOME (or METROID_BEYOND_HOME from earlier builds), the game folder itself
+#   --install DIR: install to DIR, e.g. a Steam Deck's SD card. Remembered in ~/.config/MetroidPrime4Recomp/install-dir,
+#     so later starts (from Steam, after an update) need no option; --install default goes back to the default
+#   the remembered folder
+#   ~/.local/share/MetroidPrime4Recomp (~/.local/share/MetroidBeyondRecomp from earlier builds is moved there once,
+#     a rename on the same drive)
+# --install with no folder prints where the game is installed. The runtime finds its .ini, _code.so and _data next to
+# itself, so a copy of it lives there, refreshed when this AppImage brings a different one. The Play / setup screen
+# (beyond_ui/fe.cpp) gets the recompiler, GCC and Python from inside the AppImage through SWR_RECOMPILER.
 HERE="$(dirname "$(readlink -f "$0")")"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
-GAME="${MP4_RECOMP_HOME:-${METROID_BEYOND_HOME:-$DATA/MetroidPrime4Recomp}}"
-if [ -z "$MP4_RECOMP_HOME$METROID_BEYOND_HOME" ] && [ ! -e "$GAME" ] && [ -d "$DATA/MetroidBeyondRecomp" ]; then
-  mv "$DATA/MetroidBeyondRecomp" "$GAME" 2>/dev/null || GAME="$DATA/MetroidBeyondRecomp"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/MetroidPrime4Recomp/install-dir"
+EXE="Metroid Prime 4 Beyond"
+
+# a message the player sees: in a dialog when there is no terminal (Steam, the desktop menu), else on the terminal
+say() {
+  if [ ! -t 2 ] && [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
+    { command -v zenity >/dev/null 2>&1 && zenity --"$1" --title="Metroid Prime 4 Recomp" --no-wrap --text="$2" 2>/dev/null; } ||
+    { command -v kdialog >/dev/null 2>&1 && kdialog --title "Metroid Prime 4 Recomp" --"$([ "$1" = error ] && echo error || echo msgbox)" "$2" 2>/dev/null; } ||
+    echo "$2" >&2
+  else echo "$2" >&2; fi
+}
+fail() { say error "$1"; exit 1; }
+
+# --install DIR / --install=DIR, taken out of the arguments the game gets
+INSTALL=""; ASK=""; n=$#; i=0
+while [ "$i" -lt "$n" ]; do
+  a=$1; shift; i=$((i+1))
+  case "$a" in
+    --install=*) INSTALL=${a#--install=} ;;
+    --install) if [ "$i" -lt "$n" ]; then INSTALL=$1; shift; i=$((i+1)); else ASK=1; fi ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+
+# the game folder for a folder the player names: the folder itself when it is (or already holds) an install, else a
+# MetroidPrime4Recomp folder inside it (so naming the SD card puts the game in one folder there, not loose on it)
+game_in() {
+  case "$1" in */MetroidPrime4Recomp|*/MetroidPrime4Recomp/) echo "${1%/}"; return ;; esac
+  if [ -e "$1/$EXE" ] || [ -d "$1/${EXE}_data" ]; then echo "${1%/}"; else echo "${1%/}/MetroidPrime4Recomp"; fi
+}
+# a folder the game can live in: on a drive that is there (a removed SD card must not become a folder in /run), that
+# can be written and run programs from, and holds files over 4 GB (not FAT32)
+check_place() {
+  base=$1; [ -d "$1" ] || base=$(dirname "$1")
+  [ -d "$base" ] || fail "The install folder $base was not found.
+Is the SD card (or drive) inserted? Start the game again once it is, or choose another folder with --install."
+  case "$(stat -f -c %T "$base" 2>/dev/null)" in
+    msdos|vfat) fail "$base is on a FAT32 drive, which cannot hold files over 4 GB; the game needs them.
+Format the SD card in SteamOS (Settings > Storage), which erases it, or choose another folder with --install." ;;
+  esac
+  mkdir -p "$1" 2>/dev/null && [ -w "$1" ] || fail "Cannot create or write the install folder $1."
+  t="$1/.mp4recomp-exec-test"
+  printf '#!/bin/sh\nexit 0\n' > "$t" 2>/dev/null && chmod +x "$t" 2>/dev/null && "$t" 2>/dev/null; ok=$?; rm -f "$t"
+  [ "$ok" = 0 ] || fail "Programs cannot be run from $1 (the drive is mounted without exec, or it is exFAT / NTFS without file permissions).
+Format the SD card in SteamOS (Settings > Storage), which erases it and makes it ext4, or choose another folder with --install."
+}
+
+if [ -n "$MP4_RECOMP_HOME$METROID_BEYOND_HOME" ]; then
+  GAME="${MP4_RECOMP_HOME:-$METROID_BEYOND_HOME}"
+  [ -n "$INSTALL" ] && echo "note: MP4_RECOMP_HOME is set, so --install is not used" >&2
+elif [ "$INSTALL" = default ]; then
+  rm -f "$CONF"; GAME="$DATA/MetroidPrime4Recomp"
+elif [ -n "$INSTALL" ]; then
+  case "$INSTALL" in "~"/*) INSTALL="$HOME/${INSTALL#"~/"}" ;; /*) ;; *) INSTALL="${OWD:-$PWD}/$INSTALL" ;; esac
+  GAME=$(game_in "$INSTALL"); check_place "$GAME"
+  mkdir -p "$(dirname "$CONF")" && printf '%s\n' "$GAME" > "$CONF" || fail "Cannot save the install folder in $CONF."
+  OLD="$DATA/MetroidPrime4Recomp"
+  if [ "$OLD" != "$GAME" ] && [ -d "$OLD/${EXE}_data" ] && [ ! -d "$GAME/${EXE}_data" ]; then
+    say info "The game is now installed in
+$GAME
+and its setup starts there.
+
+Your earlier install, with its saves, is still in
+$OLD
+To keep using it instead of setting up again: quit the game, move everything in that folder into the new one, and
+start the game again. Otherwise delete it once the new install works, to free the space."
+  fi
+elif [ -s "$CONF" ]; then
+  GAME=$(head -n 1 "$CONF"); check_place "$GAME"
+else
+  GAME="$DATA/MetroidPrime4Recomp"
+  if [ ! -e "$GAME" ] && [ -d "$DATA/MetroidBeyondRecomp" ]; then
+    mv "$DATA/MetroidBeyondRecomp" "$GAME" 2>/dev/null || GAME="$DATA/MetroidBeyondRecomp"
+  fi
 fi
-mkdir -p "$GAME" || { echo "Cannot create the game folder $GAME" >&2; exit 1; }
-if ! cmp -s "$HERE/usr/bin/metroid-prime-4-recomp" "$GAME/Metroid Prime 4 Beyond"; then
-  cp -f "$HERE/usr/bin/metroid-prime-4-recomp" "$GAME/Metroid Prime 4 Beyond.new" && chmod +x "$GAME/Metroid Prime 4 Beyond.new" && mv -f "$GAME/Metroid Prime 4 Beyond.new" "$GAME/Metroid Prime 4 Beyond"
+if [ -n "$ASK" ]; then
+  echo "The game is installed in: $GAME"; [ -s "$CONF" ] && echo "(chosen with --install; --install default goes back to $DATA/MetroidPrime4Recomp)"
+  exit 0
+fi
+
+mkdir -p "$GAME" || fail "Cannot create the game folder $GAME"
+if ! cmp -s "$HERE/usr/bin/metroid-prime-4-recomp" "$GAME/$EXE"; then
+  cp -f "$HERE/usr/bin/metroid-prime-4-recomp" "$GAME/$EXE.new" && chmod +x "$GAME/$EXE.new" && mv -f "$GAME/$EXE.new" "$GAME/$EXE" ||
+    fail "Cannot copy the game program to $GAME (is the drive full?)"
 fi
 [ -d "$GAME/licenses" ] || cp -r "$HERE/usr/share/metroid-prime-4-recomp/licenses" "$GAME/licenses" 2>/dev/null
 export SWR_RECOMPILER="$HERE/usr/share/metroid-prime-4-recomp/recompiler"
 cd "$GAME" || exit 1
-exec "./Metroid Prime 4 Beyond" "$@"
+exec "./$EXE" "$@"

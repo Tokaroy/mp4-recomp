@@ -43,7 +43,7 @@ Everything that changed is listed below.
 
 ## Requirements
 
-- **Linux, any x86-64 CPU** (Steam Deck included), glibc 2.38 or newer. X11, or Wayland through XWayland.
+- **Linux, any x86-64 CPU** (Steam Deck included), glibc 2.35 or newer. X11, or Wayland through XWayland.
 - **GPU:** an OpenGL 4.3+ driver (Mesa or NVIDIA). Developed and tested on an **AMD Radeon RX 9070 XT** with Mesa 26.2
   (radeonsi).
 - **SDL2** (controllers and audio) and **zlib**, which most distributions already ship.
@@ -81,10 +81,25 @@ Everything that changed is listed below.
    into the install folder and compiles the game with the bundled GCC (a few minutes on a fast CPU).
 4. Press **Play**. The first launch builds shaders in the background; later launches load them from the cache.
 
-Everything is installed to `~/.local/share/MetroidPrime4Recomp` (set `MP4_RECOMP_HOME` to use another folder). An
-install from an earlier build in `~/.local/share/MetroidBeyondRecomp` is moved there on the first start, saves and
-shader caches included.
-Settings are in `Metroid Prime 4 Beyond.ini` there, rewritten with every option explained on the first start.
+Everything is installed to `~/.local/share/MetroidPrime4Recomp`. An install from an earlier build in
+`~/.local/share/MetroidBeyondRecomp` is moved there on the first start, saves and shader caches included.
+
+**Installing somewhere else (an SD card):** start the AppImage once with `--install` and a folder. The game goes into a
+`MetroidPrime4Recomp` folder there, and the choice is remembered, so later starts (from Steam, the app menu, or after
+an update) need no option:
+
+```bash
+./Metroid_Prime_4_Recomp-x86_64.AppImage --install /run/media/deck/YOUR-SD-CARD
+```
+
+On a Steam Deck the SD card is a folder in `/run/media/deck/` (`/run/media/mmcblk0p1` on older SteamOS). You can also
+put `--install /run/media/deck/YOUR-SD-CARD` in the game's **Properties > Launch Options** in Steam. The folder must be
+on a drive formatted by SteamOS (ext4): setup refuses FAT32 (no files over 4 GB) and drives that can't run programs
+(exFAT or NTFS without file permissions). `--install` alone prints where the game is installed, and
+`--install default` goes back to `~/.local/share/MetroidPrime4Recomp`. An earlier install isn't moved for you: to keep
+it (and its saves), move everything in its folder into the new one before setting up again. `MP4_RECOMP_HOME`, if set,
+names the game folder directly and overrides `--install`.
+Settings are in `Metroid Prime 4 Beyond.ini` in the game folder, rewritten with every option explained on the first start.
 
 **Updates:** the Play screen checks this project's latest release when it opens (its UPDATES section, further down, also has
 a CHECK button and the setting to turn it off). When there is a newer build it offers UPDATE: the new AppImage is downloaded next to the one
