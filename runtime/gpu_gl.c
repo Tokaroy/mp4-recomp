@@ -125,7 +125,7 @@ static char* dlg_vs_xfb(char* src){
 /* ============================================================ formats */
 typedef struct { GLenum ifmt, fmt, type; u8 bpp, bw, bh, compressed, depth, is_int, astc, dec; } GlFmt;
 /* GLES: anything the hw can't sample gets decoded on the CPU */
-int g_gles; static int g_has_astc, g_has_s3tc, g_has_rgtc, g_has_bptc;
+int g_gles; static int g_has_astc, g_has_s3tc, g_has_rgtc, g_has_bptc, g_has_dp;
 extern int swr_bc_decode(int kind, const u8* src, u32 w, u32 h, u32* out);
 
 static GlFmt F(GLenum i, GLenum f, GLenum t, int bpp){ GlFmt r={i,f,t,(u8)bpp,1,1,0,0,0,0,0}; r.is_int=(f==GL_RGBA_INTEGER||f==GL_RG_INTEGER||f==GL_RED_INTEGER); return r; }
@@ -461,6 +461,14 @@ static void gmem_read_par(u64 gva, u8* dst, u64 size){ if(g_cs_any) cs_mem_need(
 static inline void lin_rel(u8* lin, int bps){ if(bps<0) upload_release(&upload_linear,lin); }
 static u64 g_upl_t0;
 static u64 st_tchk_ns, st_tupl_ns, st_tb_lookup, st_tb_samp, st_tb_rest, st_tb_bind, st_tb_crop, st_tb_lay, st_tb_vol, st_tb_pre;   /* texture time split: change-check hashing, uploads */
+/* any nonzero byte, 64 at a time. A 3D texture's memory is checked for data before it is uploaded (an empty one isn't
+   bound, zero3d); byte by byte, Prime 4's 150 MB volumes took about 100 ms of an area load on the GPU thread */
+static int mem_nonzero(const u8* p, u64 n){ u64 i=0;
+  for(;i<n && ((uintptr_t)(p+i)&7);i++) if(p[i]) return 1;
+  for(;i+64<=n;i+=64){ const u64* q=(const u64*)(p+i); if(q[0]|q[1]|q[2]|q[3]|q[4]|q[5]|q[6]|q[7]) return 1; }
+  for(;i<n;i++) if(p[i]) return 1;
+  return 0; }
+static u64 st_zero3d_skip, st_zero3d_bytes;
 static void tex_upload_(Tex* t);
 static void tex_upload(Tex* t){ u64 t0=plat_ns(); tex_upload_(t); st_tupl_ns+=plat_ns()-t0; }
 static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t->size; u64 upload_start=plat_ns(), upload_read_ns=0, upload_unpack_ns=0, upload_decode_ns=0, upload_driver_ns=0, upload_stage;
@@ -499,7 +507,16 @@ static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t-
       u8* src= direct? direct : upload_buffer(&upload_source,lsz);
       if(!lin || !src){ lin_rel(lin,bps); if(!direct) upload_release(&upload_source,src); static int said; if(said<4){ said++; LOG("gpu: out of memory uploading texture %ux%ux%u (%llu MB): skipped\n",t->w,t->h,t->d,(unsigned long long)(lsz>>20)); } off+= t->bl? lsz : (u64)t->pitch*th; continue; }
       upload_stage=plat_ns(); if(!direct){ if(lsz>=BP_MIN) gmem_read_par(t->gva+off,src,lsz); else gmem_read(t->gva+off,src,lsz); } upload_read_ns+=plat_ns()-upload_stage;
-      if(t->target==GL_TEXTURE_3D && t->zero3d){ for(u64 k=0;k<lsz;k++) if(src[k]){ t->zero3d=0; break; }
+      if(t->target==GL_TEXTURE_3D && t->zero3d){ if(mem_nonzero(src,lsz)) t->zero3d=0;
+        /* nothing in memory yet: an empty 3D texture isn't bound (zero3d), so its zeros aren't unpacked and sent (Prime 4
+           loads six such volumes of 75-150 MB at once when an area starts, which kept the GL thread busy for the frames
+           after). It is cleared on the GPU instead, so it matches memory when bricks arrive and only those are uploaded
+           (slab_poll). Compressed formats can't be cleared: they upload as before. SWR_UPLOAD_ZERO3D=1: upload them too */
+        static int up0=-1; static PFNGLCLEARTEXIMAGEPROC p_z3; if(up0<0){ up0=getenv("SWR_UPLOAD_ZERO3D")!=NULL; p_z3=(PFNGLCLEARTEXIMAGEPROC)backend_gl_proc("glClearTexImage"); }
+        if(t->zero3d && p_z3 && !f->compressed && !f->astc && !f->dec && t->levels==1 && !up0){
+          p_z3(t->id,0,f->fmt,f->type,NULL); st_zero3d_skip++; st_zero3d_bytes+=lsz;
+          { static int said; if(said<8){ said++; LOG("gpu: 3D texture %ux%ux%u at %llx (%llu MB) is empty in memory: cleared on the GPU instead of uploaded\n",t->w,t->h,t->d,(unsigned long long)t->gva,(unsigned long long)(lsz>>20)); } }
+          lin_rel(lin,bps); if(!direct) upload_release(&upload_source,src); off+= t->bl? lsz : (u64)t->pitch*th; continue; }
         if(!t->zero3d && was_zero3d){ static int said; if(said<16){ said++; LOG("gpu: 3D texture %ux%ux%u at %llx got its data in memory (frame %u)\n",t->w,t->h,t->d,(unsigned long long)t->gva,g_frame); } } }
       upload_stage=plat_ns();
       if(t->bl){ u32 lbd=t->bd; while(lbd>0 && ld<=(1u<<(lbd-1))) lbd--;   /* 3D: block depth (LUTs) */
@@ -1091,7 +1108,8 @@ static GLuint sampler_get(const u32* tsc){
 extern int g_glsl_version;
 struct WJob;
 typedef struct Sh { u64 hash; u32 key2; int stage; GLuint gl; ShaderInfo si; struct Sh* next; int failed; char* src;
-  GLuint sp; GLint uloc; int sps; struct WJob* sj; u32 clen; u64 qh; float lu[4]; int lu_ok; u64 skey; int xfb; struct WJob* sj_up; } Sh;   /* sp: this shader's own separable program */
+  GLuint sp; GLint uloc; int sps; struct WJob* sj; u32 clen; u64 qh; float lu[4]; int lu_ok; u64 skey; int xfb; struct WJob* sj_up;
+  u32 ia_req; u32 ia_last[64]; int ia_n; GLuint ia_sp; } Sh;   /* ia_req: the instanced attributes it was translated for, ia_last: the swr_iap last set on ia_sp (shader.h) */   /* sp: this shader's own separable program */
 static Sh* shh[1024];
 /* per-address cache. shader_hash walks the whole program (~50us per stage per draw on big shaders),
    within a submit a quick hash of the same range is enough */
@@ -1101,7 +1119,9 @@ static int g_sh_bind; static u32* g_last_r3d;
 static int sh_cb_read(u32 idx, u32 off, u32* out);
 static void sh_dump_cbs(u64 h);
 static u64 shader_hash_ns,shader_translate_ns,shader_reuse_ns,shader_uniform_ns;
+static u64 g_sh_tex_ns, g_sh_glw_ns;   /* in the draw's shader lookup: textures loaded to key a pixel shader, GL thread waits (slow-frame report) */
 static u32 g_fs_rtk, g_fs_rtm, g_fs_rts;   /* FS integer output key */
+static u32 g_vs_iak;   /* VS key: the draw's instanced attributes (shader.h swr_ia_mask), set around the vertex shader's shader_get */
 static void aw_write(const char* path, const void* d, size_t n, int append);
 
 /* common epilogue stuff: alpha test for FS, Y flip for VS */
@@ -1201,9 +1221,24 @@ static char* sh_post(char* src, int stage){
       *o=0; free(src); src=out; } }
   return src; }
 
+/* Vertex shaders drawn with instanced attributes (shader.h): the variant the draw needs, remembered in the shader cache
+   (shader_cache/vs_instanced.bin) so the pre-build from GPU memory builds it too next time, before the first draw */
+typedef struct { u64 h; u32 ai, as, iak; } IaHint;
+static int g_pcache;
+static IaHint g_iah[4096]; static int g_iah_n, g_iah_loaded;
+static void ia_hints_load(void){ if(g_iah_loaded) return; g_iah_loaded=1;
+  FILE* f=fopen("shader_cache/vs_instanced.bin","rb"); if(!f) return;
+  IaHint e; while(g_iah_n<4096 && fread(&e,sizeof e,1,f)==1) if(e.iak) g_iah[g_iah_n++]=e;
+  fclose(f); if(g_iah_n) LOG("shaders: %d instanced vertex shader variants known from earlier runs (built ahead)\n",g_iah_n); }
+static void ia_hint_add(u64 h, u32 ai, u32 as, u32 iak){
+  if(g_pcache<=0) return; ia_hints_load();
+  for(int i=0;i<g_iah_n;i++) if(g_iah[i].h==h && g_iah[i].ai==ai && g_iah[i].as==as && g_iah[i].iak==iak) return;
+  if(g_iah_n>=4096) return; IaHint e={h,ai,as,iak}; g_iah[g_iah_n++]=e;
+  FILE* f=fopen("shader_cache/vs_instanced.bin","ab"); if(f){ fwrite(&e,sizeof e,1,f); fclose(f); } }
+static u32 vs_key2(u32 ai, u32 as, u32 iak){ return ai^(as*31)^(iak? iak*0x85EBCA6Bu^0x1A000000u : 0u); }
 static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   st_shaders++; g_sh_bind= stage==ST_VS? 0 : stage==ST_GS? 3 : 4; g_shader_cb_read=sh_cb_read; /* BRX table is only used to mark targets, length doesn't change */
-  u32 key2= stage==ST_VS? (attr_int^(attr_sint*31)) : (attr_int*0x9E3779B1u ^ attr_sint*0x85EBCA6Bu ^ g_fs_rtk);
+  u32 key2= stage==ST_VS? vs_key2(attr_int,attr_sint,g_vs_iak) : (attr_int*0x9E3779B1u ^ attr_sint*0x85EBCA6Bu ^ g_fs_rtk);
   ShA* ca=&sha[(u32)((gva_code>>6)^(gva_code>>18)^((u64)key2*0x9E3779B1u)^((u32)stage<<11))&4095];
   if(ca->s && ca->gva==gva_code && ca->stage==stage && ca->key2==key2){
     if(ca->epoch==g_submit_epoch){ st_sh_fast++; return ca->s; }
@@ -1215,7 +1250,8 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   u64 hash_start=plat_ns();u32 len; u64 h=shader_hash(code,0x10000,&len);shader_hash_ns+=plat_ns()-hash_start;
   for(Sh* s=shh[h&1023];s;s=s->next) if(s->hash==h && s->stage==stage && s->key2==key2){
     ca->gva=gva_code; ca->key2=key2; ca->stage=stage; ca->epoch=g_submit_epoch; ca->s=s; free(tmp); return s; }
-  Sh* s=calloc(1,sizeof *s); s->hash=h; s->stage=stage; s->key2=key2; st_sh_new++;
+  Sh* s=calloc(1,sizeof *s); s->hash=h; s->stage=stage; s->key2=key2; s->ia_req= stage==ST_VS? g_vs_iak : 0; st_sh_new++;
+  if(s->ia_req) ia_hint_add(h,attr_int,attr_sint,s->ia_req);
   s->clen=len; s->qh=fast_hash(code,len,0);
   ca->gva=gva_code; ca->key2=key2; ca->stage=stage; ca->epoch=g_submit_epoch; ca->s=s;
   if(stage==ST_FS){ s->si.tex_int_mask=attr_int; s->si.tex_sint_mask=attr_sint; s->si.rt_int_mask=g_fs_rtm; s->si.rt_sint_mask=g_fs_rts; }
@@ -1224,7 +1260,7 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   char*src=NULL;trans_ndep=0;trans_overflow=0;
   if(cached && cached->si.unsupported) cached=NULL;   /* translated before the translator could: try again */
   if(cached){s->si=cached->si;src=malloc(strlen(cached->src)+1);strcpy(src,cached->src);}
-  else {g_shader_cb_read=trans_cb_read;src=shader_to_glsl(code,0x10000,stage,&s->si);g_shader_cb_read=sh_cb_read;}
+  else {g_shader_cb_read=trans_cb_read;g_vs_ia_req= stage==ST_VS? g_vs_iak : 0;src=shader_to_glsl(code,0x10000,stage,&s->si);g_vs_ia_req=0;g_shader_cb_read=sh_cb_read;}
   if(cached)shader_reuse_ns+=plat_ns()-trans_start;else shader_translate_ns+=plat_ns()-trans_start;
   /* dump shaders with indirect branches (code + cbufs) for offline analysis */
   { extern int g_opt_diag; if(g_opt_diag && src && strstr(src,"uint t_ = uint(")){ static int nb; if(nb<24){ nb++; plat_mkdir("captures"); plat_mkdir("captures/failed"); char fp[200];
@@ -1944,6 +1980,78 @@ static u32 attr_count(u32 size){ switch(size){ case 0x01: return 4; case 0x02: r
 
 static u32 attr_bits(u32 size){ switch(size){ case 0x01: case 0x02: case 0x04: case 0x12: return 32; case 0x03: case 0x05: case 0x0F: case 0x1B: return 16; case 0x30: case 0x31: return 0; } return 8; }
 
+/* a vertex attribute format (the hardware's size code, type 1 snorm 2 unorm 3 sint 4 uint 5 uscaled 6 sscaled 7 float,
+   BGRA order) as GL's glVertexAttrib(I)Pointer arguments, and as the format word of an instanced attribute the vertex
+   shader reads itself (shader.c g_ia_glsl: count | bits<<4 | type<<12 | bgra<<16 | packed<<20) */
+static u32 va_fmt(u32 size, u32 ty, int bgra, GLint* gcnt, GLenum* gt_, GLboolean* norm_){
+  u32 cnt=attr_count(size), bits=attr_bits(size);
+  GLenum gt; GLboolean norm= ty==1||ty==2;
+  if(size==0x30) gt= ty==1? GL_INT_2_10_10_10_REV : GL_UNSIGNED_INT_2_10_10_10_REV;
+  else if(size==0x31) gt=GL_UNSIGNED_INT_10F_11F_11F_REV;
+  else if(ty==7) gt= bits==32? GL_FLOAT : GL_HALF_FLOAT;
+  else if(ty==1||ty==3||ty==6) gt= bits==32? GL_INT : bits==16? GL_SHORT : GL_BYTE;
+  else gt= bits==32? GL_UNSIGNED_INT : bits==16? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+  int bg= bgra && cnt==4; GLint gc= bg? GL_BGRA : (GLint)cnt; if(bg) norm=GL_TRUE;   /* GL takes BGRA normalized only */
+  u32 t= bg && ty!=1? 2u : ty, pk= size==0x30? 1u : size==0x31? 2u : 0u;
+  if(gcnt) *gcnt=gc; if(gt_) *gt_=gt; if(norm_) *norm_=norm;
+  return cnt|(bits<<4)|(t<<12)|((u32)bg<<16)|(pk<<20); }
+/* instanced attributes read by the vertex shader (shader.h), checked once against the hardware vertex fetch: each
+   format, four instances from a base instance (one in three with divisor 2), at unaligned offsets for the 8- and 16-bit
+   ones. Any difference, or a shader that doesn't compile, turns it off (logged). The programs and the vertex array stay:
+   glq's uniform-location cache is by program name, so a deleted one's name must not come back */
+static int ia_selftest(void){
+  static const u8 tf[][3]={{0x01,7,0},{0x02,7,0},{0x04,7,0},{0x12,7,0},{0x03,7,0},{0x05,7,0},{0x0F,7,0},{0x1B,7,0},{0x0A,2,0},{0x0A,2,1},{0x0A,1,0},
+    {0x0A,5,0},{0x0A,6,0},{0x13,2,0},{0x18,1,0},{0x1D,2,0},{0x03,2,0},{0x03,1,0},{0x0F,6,0},{0x05,5,0},{0x30,2,0},{0x30,1,0},{0x30,5,0},{0x31,7,0},
+    {0x0A,4,0},{0x0A,3,0},{0x0F,3,0},{0x0F,4,0},{0x12,4,0},{0x01,3,0},{0x1D,4,0}};
+  u8 data[512]; u32 x=0x2545F491u; for(int i=0;i<512;i++){ x=x*1664525u+1013904223u; data[i]=(u8)(x>>24); }
+  const int rb_bind=g_ia_bind+1; char err[1024]; err[0]=0; int fail=0, live=0; int tr= getenv("SWR_TRACE_IA_CHECK")!=NULL;
+  GLuint hw[3]={0}, fe[3]={0};
+  static const char* const ty3[3]={"vec4","uvec4","ivec4"}; static const char* const out3[3]={"floatBitsToUint(%s)","%s","uvec4(%s)"};
+  static const char* const cv3[3]={"swr_iaf(q,p.z)","swr_iau(q,p.z)","ivec4(swr_iau(q,p.z))"};
+  for(int k=0;k<3 && !fail;k++){
+    char o1[64], o2[64], fetch[1024]; snprintf(o1,sizeof o1,out3[k],"a"); snprintf(o2,sizeof o2,out3[k],"in_attr0");
+    snprintf(fetch,sizeof fetch,g_ia_fetch,0,0,0,0,0,0,0,cv3[k]);
+    size_t n=strlen(g_ia_glsl)+4096; char* a=malloc(n); char* b=malloc(n);
+    snprintf(a,n,"#version 440 core\nlayout(location=0) in %s a;\nlayout(std430, binding=%d) buffer SWR_R { uvec4 v[]; } res;\nvoid main(){ res.v[gl_InstanceID]=%s; gl_Position=vec4(0.0); }\n",ty3[k],rb_bind,o1);
+    snprintf(b,n,"#version 440 core\n#extension GL_ARB_shader_draw_parameters : require\n%s in_attr0;\nlayout(std430, binding=%d) readonly buffer SWR_IA0 { uint d[]; } swr_ia0;\n"
+      "uniform uvec4 swr_iap[1];\n%slayout(std430, binding=%d) buffer SWR_R { uvec4 v[]; } res;\nvoid main(){\n%s  res.v[gl_InstanceID]=%s; gl_Position=vec4(0.0); }\n",ty3[k],g_ia_bind,g_ia_glsl,rb_bind,fetch,o2);
+    GLuint sa=compile(GL_VERTEX_SHADER,a,err,sizeof err), sb= sa? compile(GL_VERTEX_SHADER,b,err,sizeof err) : 0;
+    if(sa && sb){ hw[k]=link2(sa,0,0); fe[k]=link2(sb,0,0); }
+    if(sa) glDeleteShader(sa); if(sb) glDeleteShader(sb); free(a); free(b);
+    if(!hw[k] || !fe[k]){ LOG("gpu: instanced attribute check: test shader %d not built: %.300s\n",k,err[0]? err : "link failed"); fail=1; } }
+  GLuint vb=0, rb[2]={0,0}, vao=0;
+  if(!fail){
+    glGenVertexArrays(1,&vao); glBindVertexArray(vao);
+    glGenBuffers(1,&vb); glBindBuffer(GL_ARRAY_BUFFER,vb); glBufferData(GL_ARRAY_BUFFER,sizeof data,data,GL_STATIC_DRAW);
+    glGenBuffers(2,rb); for(int k=0;k<2;k++){ glBindBuffer(GL_SHADER_STORAGE_BUFFER,rb[k]); glBufferData(GL_SHADER_STORAGE_BUFFER,64,NULL,GL_DYNAMIC_READ); }
+    glEnable(GL_RASTERIZER_DISCARD); }
+  for(u32 t=0;t<sizeof tf/sizeof tf[0] && !fail;t++){
+    u32 size=tf[t][0], ty=tf[t][1]; int bgra=tf[t][2]; GLint gc; GLenum gt; GLboolean nm; u32 fmt=va_fmt(size,ty,bgra,&gc,&gt,&nm);
+    int k= ty==4? 1 : ty==3? 2 : 0; u32 bits=attr_bits(size); u32 off= bits==8? 5 : bits==16? 6 : 4, stride=24, div= t%3==0? 2 : 1;
+    u32 res[2][16]; static const u32 zero[16];
+    for(int path=0;path<2;path++){
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER,rb[path]); glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,64,zero);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)rb_bind,rb[path]);
+      if(path==0){ glBindBuffer(GL_ARRAY_BUFFER,vb); if(k) glVertexAttribIPointer(0,gc,gt,(GLsizei)stride,(void*)(size_t)off); else glVertexAttribPointer(0,gc,gt,nm,(GLsizei)stride,(void*)(size_t)off);
+        glVertexAttribDivisor(0,div); glEnableVertexAttribArray(0); glUseProgram(hw[k]); }
+      else { glDisableVertexAttribArray(0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)g_ia_bind,vb); glUseProgram(fe[k]);
+        u32 p[4]={off,stride,fmt,div}; glq_prog_uniform_iap(fe[k],1,p); }
+      glDrawArraysInstancedBaseInstance(GL_POINTS,0,1,4,3);
+      glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER,rb[path]); glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,0,64,res[path]); }
+    for(int e=0;e<16;e++) if(res[0][e]) live=1;   /* the draws ran (all zeros would match too) */
+    if(tr) LOG("gpu: instanced attribute check: format %02x type %u%s divisor %u: hardware %08x %08x %08x %08x / %08x %08x %08x %08x, shader %08x %08x %08x %08x / %08x %08x %08x %08x\n",size,ty,bgra? " BGRA" : "",div,
+      res[0][0],res[0][1],res[0][2],res[0][3],res[0][12],res[0][13],res[0][14],res[0][15],res[1][0],res[1][1],res[1][2],res[1][3],res[1][12],res[1][13],res[1][14],res[1][15]);
+    for(int e=0;e<16 && !fail;e++){ u32 h=res[0][e], f=res[1][e]; if(h==f) continue;
+      if(!k){ float fh, ff; memcpy(&fh,&h,4); memcpy(&ff,&f,4);
+        if((fh!=fh && ff!=ff) || fabsf(fh-ff)<=1e-6f*fmaxf(1.f,fabsf(fh))) continue; }
+      LOG("gpu: instanced attribute check: format %02x type %u%s, instance %d component %d: hardware %08x, shader %08x\n",size,ty,bgra? " BGRA" : "",e/4,e%4,h,f); fail=1; } }
+  if(!fail && !live){ LOG("gpu: instanced attribute check: the test draws wrote nothing\n"); fail=1; }
+  if(vao){ glDisableVertexAttribArray(0); glVertexAttribDivisor(0,0); glBindVertexArray(0); glDisable(GL_RASTERIZER_DISCARD); glUseProgram(0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)rb_bind,0); glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)g_ia_bind,0); glBindBuffer(GL_SHADER_STORAGE_BUFFER,0); glBindBuffer(GL_ARRAY_BUFFER,0);
+    glDeleteBuffers(1,&vb); glDeleteBuffers(2,rb); }
+  return !fail; }
+
 static GLenum topo(u32 t){ switch(t){ case 0: return GL_POINTS; case 1: return GL_LINES; case 2: return GL_LINE_LOOP; case 3: return GL_LINE_STRIP; case 4: return GL_TRIANGLES; case 5: return GL_TRIANGLE_STRIP;
   case 6: return GL_TRIANGLE_FAN; case 10: return GL_LINES_ADJACENCY; case 11: return GL_LINE_STRIP_ADJACENCY; case 12: return GL_TRIANGLES_ADJACENCY; case 13: return GL_TRIANGLE_STRIP_ADJACENCY; case 14: return GL_PATCHES; } return GL_TRIANGLES; }
 
@@ -2270,7 +2378,7 @@ static Sh* fs_get_keyed(GpuChannel* ch, u64 addr){
   if(nt){ u32 tcb=r[0x982]; u64 tic_base=((u64)r[0x55D]<<32)|r[0x55E]; u64 cba=g_cb.cb[4][tcb&31];
     for(int i=0;i<nt;i++){ ShTex* st=&s0->si.tex[i]; if(st->shadow) continue; u32 handle=sh_tex_handle(4,tcb,st); (void)cba;
       u32 tic[8]; gmem_read(tic_base+(handle&0xFFFFF)*32ull,tic,32); u32 ty=(tic[0]>>7)&7;
-      Tex* t=tex_from_tic(tic);
+      u64 tq0=plat_ns(); Tex* t=tex_from_tic(tic); g_sh_tex_ns+=plat_ns()-tq0;
       { static int dbg=-1, nd; if(dbg<0) dbg=getenv("SWR_DBG_DEPTHTEX")!=NULL; static u32 seenf[128]; int nf=0; if(dbg){ u32 fk=tic[0]&0x7F; if(!seenf[fk]){ seenf[fk]=1; nf=1; } }
         static u64 it; it++; if(dbg && (it%5000)==0) LOG("dbg depthtex: %llu texture checks so far, fmt %x\n",(unsigned long long)it,tic[0]&0x7F);
         if(dbg && nd<400 && (nf || (tic[0]&0x7F)==0x29 || (tic[0]&0x7F)==0x2A || (tic[0]&0x7F)==0x2B || (tic[0]&0x7F)==0x30 || (tic[0]&0x7F)==0x2F)){ nd++; LOG("dbg depthtex: shader %016llx slot %d tic %08x t=%p depth=%d fmt=%x cmask=%x\n",(unsigned long long)s0->hash,i,tic[0],(void*)t,t? t->f.depth : -1,t? t->f.fmt : 0,st->cmask); } }
@@ -2853,11 +2961,15 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   Sh* vs=NULL; Sh* fs=NULL;
   u32 attr_int=0, attr_sint=0;
   for(int i=0;i<32;i++){ u32 a=r[0x458+i]; u32 ty=(a>>27)&7; if(ty==3||ty==4){ attr_int|=1u<<i; if(ty==3) attr_sint|=1u<<i; } }
+  u32 attr_inst=0;   /* attributes from an instanced vertex buffer (the 16 bound below), read by the vertex shader itself */
+  if(g_ia_bind && g_sep>0) for(int i=0;i<16;i++){ u32 a=r[0x458+i]; u32 b=a&31; if(!((a>>6)&1) && (r[0x700+b*4]&0x1000) && r[0x620+b]) attr_inst|=1u<<i; }
   /* stage slots: 0 VertexA, 1 VertexB, 2 TessCtrl, 3 TessEval, 4 Geometry, 5 Fragment.
      VertexB is always on even with the enable bit clear (NVN doesn't set it) */
   g_last_r3d=r;
   for(int i=1;i<6;i+=4){ u32 cfg=r[0x800+i*0x10]; if(i!=1 && !(cfg&1)) continue; u64 addr=code+r[0x801+i*0x10];
-    if(i==1) TM(TM_SH,vs=shader_get(addr,ST_VS,attr_int,attr_sint)); else TM(TM_SH,fs=fs_get_keyed(ch,addr)); }
+    { extern volatile unsigned long long g_glq_wait_ns; u64 w0=g_glq_wait_ns;
+      if(i==1){ g_vs_iak=attr_inst; TM(TM_SH,vs=shader_get(addr,ST_VS,attr_int,attr_sint)); g_vs_iak=0; } else TM(TM_SH,fs=fs_get_keyed(ch,addr));
+      g_sh_glw_ns+=g_glq_wait_ns-w0; } }
   /* geometry stage (separate programs only): keyed by the input primitive and the vertex stage's outputs, which a
      passthrough shader sends on. SWR_NO_GS=1: draw without it as before */
   Sh* gs=NULL;
@@ -2972,6 +3084,10 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   u64 tb0_=plat_ns();
   glBindVertexArray(g_vao);
   u32 used=vs->si.in_mask;
+  /* instanced attributes the vertex shader reads itself (shader.h): the k-th one's buffer at storage binding g_ia_bind+k,
+     where it is and how to decode it in swr_iap[k] */
+  u32 iaf= vs->ia_req? swr_ia_mask(vs->ia_req,used,vs->si.ngbuf) : 0, ia_done=0, ia_p[64]; int ia_n=0;
+  for(u32 m=iaf;m;m&=m-1) ia_n++;
   /* attrib state cache for g_vao */
   static u32 va_en; static u32 va_key[16][8]; static int va_const[16];
   if(g_va_inval){ g_va_inval=0; memset(va_key,0,sizeof va_key); }
@@ -2994,15 +3110,12 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
         if(vl_lim[h]!=lim || start<vl_lo[h]){ if(vl_lim[h]==lim && vl_lo[h]-start>(16u<<20)) vl_lo[h]=start; else if(vl_lim[h]!=lim){ vl_lim[h]=lim; vl_lo[h]=start; } else vl_lo[h]=start; }
         if(start-vl_lo[h]<=(16u<<20)){ vb_base=vl_lo[h]; len=lim-vb_base+1; if(len>64u<<20){ len=64u<<20; vb_base=start; len=lim-start+1; if(len>64u<<20) len=64u<<20; } } } }
     GLuint vbid=buf_cached(GL_ARRAY_BUFFER,vb_base,len); off+=(u32)(start-vb_base);
-    u32 cnt=attr_count(size), bits=attr_bits(size);
-    GLenum gt; GLboolean norm= ty==1||ty==2;
-    if(size==0x30) gt= ty==1? GL_INT_2_10_10_10_REV : GL_UNSIGNED_INT_2_10_10_10_REV;
-    else if(size==0x31) gt=GL_UNSIGNED_INT_10F_11F_11F_REV;
-    else if(ty==7) gt= bits==32? GL_FLOAT : GL_HALF_FLOAT;
-    else if(ty==1||ty==3||ty==6) gt= bits==32? GL_INT : bits==16? GL_SHORT : GL_BYTE;
-    else gt= bits==32? GL_UNSIGNED_INT : bits==16? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
-    GLint gcnt= (bgra && cnt==4)? GL_BGRA : (GLint)cnt; if(gcnt==GL_BGRA) norm=GL_TRUE;
+    u32 cnt=attr_count(size); GLint gcnt; GLenum gt; GLboolean norm; u32 iafmt=va_fmt(size,ty,bgra,&gcnt,&gt,&norm);
     u32 div= r[0x620+buf]? (va[3]? va[3] : 1) : 0;
+    if((iaf>>i)&1){ int k=0; for(u32 m=iaf&((1u<<i)-1u);m;m&=m-1) k++;
+      VA_OFF(i); va_key[i][0]=0; va_const[i]=0;   /* not a hardware attribute now; specified again if it becomes one */
+      ia_p[k*4]=off; ia_p[k*4+1]=stride; ia_p[k*4+2]=iafmt; ia_p[k*4+3]=div? div : 1;
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)(g_ia_bind+k),vbid); ia_done|=1u<<k; continue; }
     u32 key[8]={vbid,(u32)gcnt,gt,(u32)norm|((ty==3||ty==4)? 2u : 0u),stride,off,div,cnt};
     if(!(va_en&(1u<<i))){ glEnableVertexAttribArray(i); va_en|=1u<<i; }
     va_const[i]=0;
@@ -3011,6 +3124,11 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
       else glVertexAttribPointer(i,gcnt,gt,norm,stride,(void*)(size_t)off);
       glVertexAttribDivisor(i,div); }
   }
+  if(iaf){ static GLuint ia_dummy;   /* an attribute without data reads (0,0,0,1): no components, from a small zero buffer */
+    { static int said; if(!said){ said=1; LOG("gpu: first draw reading instanced attributes in the vertex shader: frame %u, vs %016llx, attributes %x\n",g_frame,(unsigned long long)vs->hash,iaf); } }
+    for(int k=0;k<ia_n;k++) if(!((ia_done>>k)&1)){ if(!ia_dummy){ static const u32 z[16]; glGenBuffers(1,&ia_dummy); glBindBuffer(GL_SHADER_STORAGE_BUFFER,ia_dummy); glBufferData(GL_SHADER_STORAGE_BUFFER,sizeof z,z,GL_STATIC_DRAW); }
+      ia_p[k*4]=ia_p[k*4+1]=ia_p[k*4+2]=0; ia_p[k*4+3]=1; glBindBufferBase(GL_SHADER_STORAGE_BUFFER,(GLuint)(g_ia_bind+k),ia_dummy); }
+    if(vs->ia_sp!=vpp || vs->ia_n!=ia_n || memcmp(vs->ia_last,ia_p,(size_t)ia_n*16)){ memcpy(vs->ia_last,ia_p,(size_t)ia_n*16); vs->ia_n=ia_n; vs->ia_sp=vpp; glq_prog_uniform_iap(vpp,ia_n,ia_p); } }
   g_tm[TM_BUF]+=plat_ns()-tb0_; tb0_=plat_ns();
   GLenum mode=topo(topology);
   if(topology==7 || topology==8 || topology==9){ mode=GL_TRIANGLE_FAN; if(topology==7) mode=GL_TRIANGLES; if(topology==8) mode=GL_TRIANGLE_STRIP; }   /* quad strip = tri strip */
@@ -3817,7 +3935,7 @@ typedef struct { u8* code; u32 avail; int stage; u64 h, t; } MemProg;
 static MemProg* g_mp; static u32 g_mp_n, g_mp_cap, g_mp_next; static PMutex g_mp_m; static int g_mp_on=-1;
 static u32 g_mp_found, g_mp_built, g_mp_had, g_mp_failed, g_mp_logged; static u64 g_mp_ns;
 typedef struct { WJob* j; u64 key; int stage; } MpJob;
-static MpJob g_mpj[64]; static int g_mpj_n;
+static MpJob g_mpj[128]; static int g_mpj_n;   /* 63 + the variants of the last shader taken */
 /* Which vertex attributes a vertex shader reads as integers (the draw learns it from the vertex format: shader_get
    attr_int), guessed from how its float translation first uses each register loaded from one: an index scaled by a stride
    (bitfieldExtract(r,0,16) * ...), shifted or added is an integer (bone and instance indices); uintBitsToFloat or
@@ -3928,14 +4046,18 @@ static void mem_prebuild_step(void){
        the draw computes (no integer targets: g_fs_rtk 0x5A5A0000). It was most of the first-draw compiles of a new area.
        Building both would add about 700 compiles to the 1900 of the first area, for the 2 in 48 guesses that are wrong */
     u32 vtm=0; int nv=1;   /* vertex shaders: vtm = the integer attributes (vs_guess_int_attrs), key2 is that mask */
-    for(int v=0;v<nv;v++){
+    /* and the instanced variants this vertex shader was drawn with before (ia_hint_add), after those */
+    int ihv[4], nh=0; if(stage==ST_VS && g_ia_bind){ ia_hints_load(); for(int q=0;q<g_iah_n && nh<4;q++) if(g_iah[q].h==h) ihv[nh++]=q; }
+    for(int v=0;v<nv+nh;v++){
     g_mp_found++;
-    ShaderInfo si; memset(&si,0,sizeof si); u32 key2=0;
-    if(v && stage==ST_FS){ si.tex_int_mask=vtm; key2= vtm*0x9E3779B1u ^ 0x5A5A0000u; } else if(v){ si.attr_int_mask=vtm; key2=vtm; }
+    ShaderInfo si; memset(&si,0,sizeof si); u32 key2=0; const IaHint* hv= v>=nv? &g_iah[ihv[v-nv]] : NULL;
+    if(hv){ si.attr_int_mask=hv->ai; si.attr_sint_mask=hv->as; key2=vs_key2(hv->ai,hv->as,hv->iak); }
+    else if(v && stage==ST_FS){ si.tex_int_mask=vtm; key2= vtm*0x9E3779B1u ^ 0x5A5A0000u; } else if(v){ si.attr_int_mask=vtm; key2=vtm; }
     g_sh_bind= stage==ST_VS? 0 : 4;
     u64 tk=translated_key(h,stage,key2,&si); Translated* c=translated_get(tk); char* src=NULL;
     if(c){ si=c->si; src=malloc(strlen(c->src)+1); strcpy(src,c->src); if(!v) mp_seen_put(h,stage,1); }
-    else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; src=shader_to_glsl(mp.code,mp.avail,stage,&si); g_shader_cb_read=sh_cb_read;
+    else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; g_vs_ia_req= hv? hv->iak : 0; src=shader_to_glsl(mp.code,mp.avail,stage,&si); g_vs_ia_req=0; g_shader_cb_read=sh_cb_read;
+      if(hv) si.attr_sint_mask=hv->as;   /* as shader_get keeps it */
       if(!v) mp_seen_put(h,stage,trans_overflow? 3 : 1);
       if(!src || si.unsupported){ /* why, by the first instruction the translator lacks: logged with the summary */
         static char why[16][24]; static u32 nwhy[16]; const char* w= !src? "no GLSL" : si.first_unsupported; char op[24]; snprintf(op,sizeof op,"%.*s",(int)strcspn(w," "),w);
@@ -4029,14 +4151,16 @@ static void res_dyn_step(void){
 /* end of frame: was it slow, and where did the time go */
 static u64 g_idle_ns;   /* GPU thread waiting for the game's next piece of work */
 static void frame_stats(void){
-  extern volatile unsigned long long g_glq_wait_ns, g_glq_waits; extern unsigned long long g_glq_wait_max; extern const char* g_glq_wait_what; static u64 l_gw, l_gn, l_idle;
+  extern volatile unsigned long long g_glq_wait_ns, g_glq_waits; extern unsigned long long g_glq_wait_max; extern const char* g_glq_wait_what; static u64 l_gw, l_gn, l_idle, l_shh, l_sht, l_shr, l_sx, l_sgw;
   u64 now=plat_ns(); if(!g_fr_t0){ g_fr_t0=now; memset(g_tm,0,sizeof g_tm); g_fr_shnew=st_sh_new; l_gw=g_glq_wait_ns; l_gn=g_glq_waits; l_idle=g_idle_ns; return; }
   u64 dt=now-g_fr_t0; g_fr_t0=now; if(dt>g_fr_max) g_fr_max=dt;
   static u64 thr; if(!thr){ const char* e=getenv("SWR_SLOW_FRAME_MS"); thr= (e? (u64)atoi(e) : 50)*1000000ull; }   /* 50 ms: low-end PCs should show their drops too */
   if(dt>thr && g_rf && g_fr_slow<300){ g_fr_slow++; u32 pend=__atomic_load_n(&wq_hi.t,__ATOMIC_RELAXED)-__atomic_load_n(&wq_hi.h,__ATOMIC_RELAXED);
-    fprintf(g_rf,"   slow frame %.0f ms at %.2f s (GPU thread: shaders %.0f+%.0f, state %.0f, textures %.0f, buffers %.0f, driver %.0f, present %.0f ms; waiting for the game %.0f ms, for the GL thread %.0f ms in %llu waits, longest %.0f ms in %s) new shaders %llu, queued %u\n",
+    fprintf(g_rf,"   slow frame %.0f ms at %.2f s (GPU thread: shaders %.0f+%.0f, state %.0f, textures %.0f, buffers %.0f, driver %.0f, present %.0f ms; waiting for the game %.0f ms, for the GL thread %.0f ms in %llu waits, longest %.0f ms in %s) new shaders %llu, queued %u; shaders: hashing %.0f, translating %.0f, cached translations %.0f, textures for keys %.0f, GL thread waits %.0f ms\n",
       dt/1e6,(now-g_upl_t0)/1e9,g_tm[TM_SH]/1e6,g_tm[TM_SHREADY]/1e6,g_tm[TM_STATE]/1e6,g_tm[TM_TEX]/1e6,(g_tm[TM_BUF]+g_tm[TM_CB]+g_tm[TM_GB])/1e6,g_tm[TM_DRAW]/1e6,g_tm[TM_SWAP]/1e6,
-      (g_idle_ns-l_idle)/1e6,(g_glq_wait_ns-l_gw)/1e6,(unsigned long long)(g_glq_waits-l_gn),g_glq_wait_max/1e6,g_glq_wait_what? g_glq_wait_what : "-",(unsigned long long)(st_sh_new-g_fr_shnew),pend); }
+      (g_idle_ns-l_idle)/1e6,(g_glq_wait_ns-l_gw)/1e6,(unsigned long long)(g_glq_waits-l_gn),g_glq_wait_max/1e6,g_glq_wait_what? g_glq_wait_what : "-",(unsigned long long)(st_sh_new-g_fr_shnew),pend,
+      (shader_hash_ns-l_shh)/1e6,(shader_translate_ns-l_sht)/1e6,(shader_reuse_ns-l_shr)/1e6,(g_sh_tex_ns-l_sx)/1e6,(g_sh_glw_ns-l_sgw)/1e6); }
+  l_shh=shader_hash_ns; l_sht=shader_translate_ns; l_shr=shader_reuse_ns; l_sx=g_sh_tex_ns; l_sgw=g_sh_glw_ns;
   l_gw=g_glq_wait_ns; l_gn=g_glq_waits; l_idle=g_idle_ns; g_glq_wait_max=0; g_glq_wait_what=NULL;
   rd_swap+=g_tm[TM_SWAP];
   for(int k=0;k<TM_N;k++){ g_tmp[k]+=g_tm[k]; g_tm[k]=0; } g_fr_shnew=st_sh_new;
@@ -4065,7 +4189,8 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     for(GLint k=0;k<n && gsi;k++){ const char* e=(const char*)gsi(GL_EXTENSIONS,(GLuint)k); if(!e) continue;
       if(!strcmp(e,"GL_KHR_parallel_shader_compile")||!strcmp(e,"GL_ARB_parallel_shader_compile")) g_par=1;
       if(!g_gles && !strcmp(e,"GL_KHR_texture_compression_astc_ldr") && getenv("SWR_ASTC_DRIVER")) g_has_astc=1;   /* desktop drivers emulate it on the GL thread */
-      if(!strcmp(e,"GL_ARB_shader_viewport_layer_array")) vl|=1; if(!strcmp(e,"GL_AMD_vertex_shader_layer")) vl|=2; if(!strcmp(e,"GL_NV_viewport_array2")) vl|=4; }
+      if(!strcmp(e,"GL_ARB_shader_viewport_layer_array")) vl|=1; if(!strcmp(e,"GL_AMD_vertex_shader_layer")) vl|=2; if(!strcmp(e,"GL_NV_viewport_array2")) vl|=4;
+      if(!strcmp(e,"GL_ARB_shader_draw_parameters")) g_has_dp=1; }
     { extern int g_vs_layer_ext; g_vs_layer_ext= g_gles? 0 : (vl&1)? 1 : (vl&2)? 2 : (vl&4)? 3 : 0;
       LOG("gpu: render target layer from the vertex shader: %s\n",g_vs_layer_ext==1? "ARB_shader_viewport_layer_array" : g_vs_layer_ext==2? "AMD_vertex_shader_layer" : g_vs_layer_ext==3? "NV_viewport_array2" : "not available (drawn to layer 0)"); }
     if(!g_gles) LOG("ASTC textures: %s\n",g_has_astc && !getenv("SWR_ASTC_CPU")? "decoded by the GPU (fast, with mipmaps)" : "decoded on the CPU");
@@ -4076,7 +4201,15 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     LOG("OpenGL limits: textures %d (per stage %d), UBO %d (VS %d, FS %d), uniform locations %d\n",v[0],v[1],v[2],v[3],v[4],v[5]);
     GLint sb[4]={0}; glGetIntegerv(0x90DD,&sb[0]); glGetIntegerv(0x90D6,&sb[1]); glGetIntegerv(0x90DA,&sb[2]); glGetIntegerv(0x90D7,&sb[3]);   /* bindings, VS, FS, GS blocks */
     g_gbuf_max= !g_gles && sb[0]>=48 && sb[1]>=16 && sb[2]>=16? 16 : 8;
-    LOG("OpenGL limits: storage buffers %d bindings (VS %d, FS %d, GS %d): up to %d per draw stage\n",sb[0],sb[1],sb[2],sb[3],g_gbuf_max); }
+    LOG("OpenGL limits: storage buffers %d bindings (VS %d, FS %d, GS %d): up to %d per draw stage\n",sb[0],sb[1],sb[2],sb[3],g_gbuf_max);
+    /* instanced attributes read by the vertex shader (shader.h): radeonsi (Mesa's AMD driver, the Steam Deck's too).
+       Bindings 48-63, above the global buffers'. SWR_INSTANCE_FETCH=0 off, =1 on with any driver */
+    { const char* rn=(const char*)glGetString(GL_RENDERER); const char* e=getenv("SWR_INSTANCE_FETCH");
+      int want= e? atoi(e)!=0 : (rn && strstr(rn,"radeonsi")!=NULL);
+      if(want && !g_gles && g_has_dp && sb[0]>=64 && sb[1]>=4){ g_ia_bind=48; g_vs_ssbo_max= sb[1]<16? sb[1] : 16;
+        if(!ia_selftest()){ g_ia_bind=0; LOG("gpu: instanced vertex attributes keep the hardware divisor (the shader's reading didn't match it)\n"); }
+        else LOG("gpu: instanced vertex attributes are read by the vertex shader (the driver would compile a variant at the first draw)\n"); }
+      else if(want) LOG("gpu: instanced vertex attributes keep the hardware divisor (needs ARB_shader_draw_parameters and 64 storage-buffer bindings)\n"); } }
   if(g_verbose>=2){ typedef void (APIENTRY*DBGCB)(GLDEBUGPROC,const void*); DBGCB f=(DBGCB)backend_gl_proc("glDebugMessageCallback"); if(f){ glEnable(GL_DEBUG_OUTPUT); f(gl_dbg,NULL); } }
   glGenFramebuffers(1,&g_fbo); glGenFramebuffers(1,&g_rfbo); glGenFramebuffers(1,&g_dfbo); glGenVertexArrays(1,&g_vao); glGenVertexArrays(1,&g_scratch_vao); glGenBuffers(32,g_vbuf); glGenBuffers(1,&g_ibuf);
   for(int s=0;s<5;s++) glGenBuffers(18,g_ubuf[s]);

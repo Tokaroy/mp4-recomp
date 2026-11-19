@@ -457,7 +457,9 @@ void plat_prof_start(int boot){
   uintptr_t h=_beginthreadex(NULL,0,prof_thread,NULL,0,NULL); if(h){ SetThreadPriority((HANDLE)h,THREAD_PRIORITY_TIME_CRITICAL); CloseHandle((HANDLE)h); } }
 #else
 void plat_thread_cpu_report(FILE*f,u64 now,int prime){(void)now;if(f&&!prime)fprintf(f,"      threads CPU: unavailable on this platform\n");}
-void plat_diag_role(const char*s){(void)s;}
+#include <sys/prctl.h>
+/* the thread's name in top, gdb and /proc (15 characters at most) */
+void plat_diag_role(const char*s){ char n[16]; snprintf(n,sizeof n,"%s",s); prctl(PR_SET_NAME,n,0,0,0); }
 void plat_diag_guest(KThread*t){(void)t;}
 void plat_thread_diag_start(void){}
 /* ------------------------------------------------------------------ POSIX */
@@ -605,4 +607,36 @@ void plat_install_crash_handler(void){
 void plat_prof_start(int boot){ (void)boot; }
 void plat_prof_mark_main(void){}
 void plat_prof_mark_gpu(void){}
+#endif
+#ifdef __linux__
+/* SWR_SAMPLE_GL=FILE: samples the calling thread's stack every 0.5 ms of its CPU time (a diagnostic for driver work on
+   the GL thread: no symbols needed in the driver to see which library the time goes to). Written at exit: one line per
+   sample, the CLOCK_MONOTONIC time and the return addresses as library+offset (symbol+offset when exported) */
+#include <execinfo.h>
+#define SMP_MAX 200000
+#define SMP_DEPTH 24
+static struct { unsigned long long t; int n; void* pc[SMP_DEPTH]; } *g_smp; static volatile int g_smp_n; static char g_smp_path[512];
+static void smp_sig(int s, siginfo_t* si, void* uc){ (void)s; (void)si; (void)uc; int i=g_smp_n; if(i>=SMP_MAX) return; g_smp_n=i+1;
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); g_smp[i].t=(unsigned long long)ts.tv_sec*1000000000ull+ts.tv_nsec;
+  g_smp[i].n=backtrace(g_smp[i].pc,SMP_DEPTH); }
+void plat_sample_dump(void){ if(!g_smp || !g_smp_path[0]) return; FILE* f=fopen(g_smp_path,"w"); if(!f) return;
+  for(int i=0;i<g_smp_n;i++){ fprintf(f,"%llu",g_smp[i].t);
+    for(int k=2;k<g_smp[i].n;k++){ Dl_info d; void* a=g_smp[i].pc[k];
+      if(dladdr(a,&d) && d.dli_fname){ const char* b=strrchr(d.dli_fname,'/'); b=b? b+1 : d.dli_fname;
+        if(d.dli_sname) fprintf(f," %s:%s+%lx",b,d.dli_sname,(unsigned long)((char*)a-(char*)d.dli_saddr));
+        else fprintf(f," %s+%lx",b,(unsigned long)((char*)a-(char*)d.dli_fbase)); }
+      else fprintf(f," ?%p",a); }
+    fputc('\n',f); }
+  fclose(f); }
+void plat_sample_this_thread(void){ const char* p=getenv("SWR_SAMPLE_GL"); if(!p || !*p) return;
+  snprintf(g_smp_path,sizeof g_smp_path,"%s",p); g_smp=calloc(SMP_MAX,sizeof *g_smp); if(!g_smp) return;
+  void* warm[4]; backtrace(warm,4);   /* loads the unwinder outside the signal handler */
+  struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=smp_sig; sa.sa_flags=SA_SIGINFO|SA_RESTART; sigemptyset(&sa.sa_mask); sigaction(SIGPROF,&sa,NULL);
+  struct sigevent se; memset(&se,0,sizeof se); se.sigev_notify=SIGEV_THREAD_ID; se.sigev_signo=SIGPROF; se._sigev_un._tid=(pid_t)syscall(SYS_gettid);
+  timer_t tm; if(timer_create(CLOCK_THREAD_CPUTIME_ID,&se,&tm)){ LOG("sample: timer_create failed\n"); return; }
+  struct itimerspec it={{0,500000},{0,500000}}; timer_settime(tm,0,&it,NULL); atexit(plat_sample_dump);
+  LOG("sample: this thread's stack every 0.5 ms of its CPU time -> %s\n",p); }
+#else
+void plat_sample_this_thread(void){}
+void plat_sample_dump(void){}
 #endif

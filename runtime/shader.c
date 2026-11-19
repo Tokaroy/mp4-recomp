@@ -9,6 +9,7 @@
 #include <stdarg.h>
 
 int g_glsl_version=440;
+int g_ia_bind=0, g_vs_ssbo_max=16; __thread u32 g_vs_ia_req;   /* instanced attributes read by the vertex shader (shader.h) */
 int g_gbuf_max=8;
 int g_vs_layer_ext=1;   /* 1 ARB_shader_viewport_layer_array, 2 AMD_vertex_shader_layer, 3 NV_viewport_array2, 0 none */
 int g_glsl_es=0;
@@ -1294,6 +1295,28 @@ static int st_check(Ctx* c, u32 n, u32* jt){
     S[sp].end=t; S[sp].end2=0; S[sp].els=0; S[sp].in_else=0; sp++; }
   return 1; }
 
+/* instanced attributes read by the vertex shader (shader.h): the decoding helpers, and the statement that reads the k-th
+   one into in_attr<i> (k six times, then i and the conversion: swr_iaf(q,p.z), swr_iau(q,p.z) or ivec4(swr_iau(q,p.z)));
+   gpu_gl.c checks them against the hardware vertex fetch at startup (ia_selftest) */
+const char g_ia_glsl[]="uvec4 swr_iaq(uvec4 q, uint q4, uint a){ uint s=(a&3u)*8u; if(s==0u) return q;\n"
+               "  return uvec4((q.x>>s)|(q.y<<(32u-s)), (q.y>>s)|(q.z<<(32u-s)), (q.z>>s)|(q.w<<(32u-s)), (q.w>>s)|(q4<<(32u-s))); }\n"
+               "uint swr_iac(uvec4 q, uint c, uint b){ if(b==32u) return q[c]; if(b==16u) return (q[c>>1u]>>((c&1u)*16u))&0xFFFFu; return (q[c>>2u]>>((c&3u)*8u))&0xFFu; }\n"
+               "int swr_iax(uint v, uint b){ return b>=32u? int(v) : (int(v<<(32u-b))>>int(32u-b)); }\n"
+               "float swr_iah(uint v, uint mb){ uint e=v>>mb, m=v&((1u<<mb)-1u); if(e==0u) return float(m)*exp2(-14.0-float(mb));\n"
+               "  if(e==31u) return uintBitsToFloat(m==0u? 0x7F800000u : 0x7FC00000u); return (1.0+float(m)*exp2(-float(mb)))*exp2(float(e)-15.0); }\n"
+               "vec4 swr_iaf(uvec4 q, uint f){ uint n=f&7u, b=(f>>4u)&63u, t=(f>>12u)&7u, pk=(f>>20u)&3u; bool sg= t==1u||t==3u||t==6u, nm= t==1u||t==2u; vec4 o=vec4(0.0,0.0,0.0,1.0);\n"
+               "  if(pk==1u){ uvec4 u=uvec4(q.x&1023u,(q.x>>10u)&1023u,(q.x>>20u)&1023u,q.x>>30u);\n"
+               "    if(sg){ vec4 s=vec4(swr_iax(u.x,10u),swr_iax(u.y,10u),swr_iax(u.z,10u),swr_iax(u.w,2u)); o= nm? max(s/vec4(511.0,511.0,511.0,1.0),vec4(-1.0)) : s; }\n"
+               "    else o= nm? vec4(u)/vec4(1023.0,1023.0,1023.0,3.0) : vec4(u); }\n"
+               "  else if(pk==2u) o=vec4(swr_iah(q.x&2047u,6u),swr_iah((q.x>>11u)&2047u,6u),swr_iah(q.x>>22u,5u),1.0);\n"
+               "  else for(uint c=0u;c<n;c++){ uint v=swr_iac(q,c,b);\n"
+               "    o[c]= t==7u? (b==32u? uintBitsToFloat(v) : unpackHalf2x16(v).x) : nm? (sg? max(float(swr_iax(v,b))/(exp2(float(b-1u))-1.0),-1.0) : float(v)/(exp2(float(b))-1.0)) : (sg? float(swr_iax(v,b)) : float(v)); }\n"
+               "  return ((f>>16u)&1u)!=0u? o.zyxw : o; }\n"
+               "uvec4 swr_iau(uvec4 q, uint f){ uint n=f&7u, b=(f>>4u)&63u, t=(f>>12u)&7u; uvec4 o=uvec4(0u,0u,0u,1u);\n"
+               "  for(uint c=0u;c<n;c++){ uint v=swr_iac(q,c,b); o[c]= t==3u? uint(swr_iax(v,b)) : v; } return o; }\n";
+const char g_ia_fetch[]="  { uvec4 p=swr_iap[%d]; uint a=p.x+(uint(gl_BaseInstanceARB)+uint(gl_InstanceID)/max(p.w,1u))*p.y, w=a>>2u;\n"
+             "    uvec4 q=swr_iaq(uvec4(swr_ia%d.d[w],swr_ia%d.d[w+1u],swr_ia%d.d[w+2u],swr_ia%d.d[w+3u]),(a&3u)!=0u? swr_ia%d.d[w+4u] : 0u,a);\n"
+             "    in_attr%d = %s; }\n";
 char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   if(!ops_ready) ops_init();
   Ctx* c=calloc(1,sizeof(Ctx)); c->w=(const u64*)code; c->stage=stage; c->si=si;
@@ -1386,6 +1409,9 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
       "isampler2D","usampler2D","isampler3D","usampler3D","isampler2DArray","usampler2DArray"};
     for(unsigned k=0;k<sizeof ps/sizeof ps[0];k++) sb_f(D,"precision highp %s;\n",ps[k]); }
   else sb_f(D,"#version %d core\n",g_glsl_version);
+  u32 iaf=0;   /* instanced attributes this vertex shader reads itself (shader.h swr_ia_mask) */
+  if(stage==ST_VS && !g_glsl_es && g_vs_ia_req){ u32 inm=0; for(int i=0;i<32;i++) if(c->in_used[i]) inm|=1u<<i; iaf=swr_ia_mask(g_vs_ia_req,inm,si->ngbuf); }
+  if(iaf) sb_put(D,"#extension GL_ARB_shader_draw_parameters : require\n");
   /* gl_Layer from the VS needs an extension on desktop GL; without one we render to layer 0 */
   if(stage==ST_VS && si->writes_layer){
     if(g_vs_layer_ext==1) sb_put(D,"#extension GL_ARB_shader_viewport_layer_array : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
@@ -1406,7 +1432,16 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   for(int i=0;i<18;i++) if(si->cbuf_mask&(1u<<i)) sb_f(D,"layout(std140, binding=%d) uniform S%d_CB%d { vec4 d[4096]; } cb%d;\n",base_bind+i,stage,i,i);
   for(int i=0;i<si->ntex;i++){ ShTex* t=&si->tex[i]; sb_f(D,"layout(binding=%d) uniform %s S%d_tex%d;\n#define tex%d S%d_tex%d\n",slot*(g_glsl_es? 16 : 32)+i,T("%s%s",(!t->shadow && ((si->tex_int_mask>>i)&1))? (((si->tex_sint_mask>>i)&1)? "i" : "u") : "",samp_type(t->type,t->array,t->shadow)),stage,i,i,stage,i); }   /* stage-unique name */
   if(stage==ST_VS){
-    for(int i=0;i<32;i++) if(c->in_used[i]){ si->in_mask|=1u<<i; int isint=(attr_int>>i)&1; sb_f(D,"layout(location=%d) in %s in_attr%d;\n",i,isint? ((si->attr_sint_mask>>i)&1? "ivec4":"uvec4") : "vec4",i); }
+    for(int i=0;i<32;i++) if(c->in_used[i]){ si->in_mask|=1u<<i; int isint=(attr_int>>i)&1; const char* ty= isint? ((si->attr_sint_mask>>i)&1? "ivec4":"uvec4") : "vec4";
+      if((iaf>>i)&1) sb_f(D,"%s in_attr%d;\n",ty,i); else sb_f(D,"layout(location=%d) in %s in_attr%d;\n",i,ty,i); }
+    if(iaf){ int k=0;
+      for(int i=0;i<16;i++) if((iaf>>i)&1){ sb_f(D,"layout(std430, binding=%d) readonly buffer SWR_IA%d { uint d[]; } swr_ia%d;\n",g_ia_bind+k,k,k); k++; }
+      /* per attribute: x byte offset of element 0, y stride, z format (count | bits<<4 | type<<12 | bgra<<16 | packed<<20,
+         type as the hardware's: 1 snorm 2 unorm 3 sint 4 uint 5 uscaled 6 sscaled 7 float; packed 1 = 2_10_10_10, 2 = 11_11_10
+         float), w divisor; gpu_gl.c sets it per draw. The 16 bytes from the attribute's address, then decoded as the vertex
+         fetch would (the GL conversion rules) */
+      sb_f(D,"uniform uvec4 swr_iap[%d];\n",k);
+      sb_put(D,g_ia_glsl); }
     for(int i=0;i<32;i++) if(c->out_used[i]){ si->out_mask|=1u<<i; sb_f(D,"layout(location=%d) out vec4 out_attr%d;\n",i,i); }
     /* invariant so depth matches across passes with different shaders */
     if(!g_glsl_es){ if(si->writes_layer) sb_put(D,"invariant gl_Position;\nout float gl_ClipDistance[8];\n");   /* Mesa drops gl_Layer when the block is redeclared */
@@ -1483,6 +1518,10 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
      Screen-space passes commonly write only X/Y; undefined Z/W can clip a
      whole quad or one triangle depending on preceding GPU execution. */
   if(c->stage==ST_VS) sb_put(D,"  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n");
+  /* instanced attributes this shader reads itself: element baseInstance + instance/divisor, as the vertex fetch does */
+  if(iaf){ int k=0; for(int i=0;i<16;i++) if((iaf>>i)&1){ int isint=(attr_int>>i)&1;
+      sb_f(D,g_ia_fetch,k,k,k,k,k,k,i,isint? (((si->attr_sint_mask>>i)&1)? "ivec4(swr_iau(q,p.z))" : "swr_iau(q,p.z)") : "swr_iaf(q,p.z)");
+      k++; } }
   /* outputs the shader leaves unwritten read as (0,0,0,1) in the next stage (as yuzu sets them), not undefined: Sol Valley's
      ground overlay reads a material index from a component its vertex shader never writes, and radeonsi's garbage there
      sent it down a path that made NaN (black tiles while turning) */

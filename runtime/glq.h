@@ -20,4 +20,6 @@ void glq_occl(int op, int slot, GLuint buf, uintptr_t off);
 /* a game program's swr_vp (which 0) or swr_at (1) vec4, set by name: the GL thread looks the location up at the first set
    and keeps it, so the GPU thread never waits for a glGetUniformLocation round trip */
 void glq_prog_uniform_named(GLuint prog, int which, const float* v);
+/* swr_iap (uvec4[n], n<=16) of a vertex program: instanced attributes the shader reads itself (shader.h) */
+void glq_prog_uniform_iap(GLuint prog, int n, const unsigned* v);
 #endif

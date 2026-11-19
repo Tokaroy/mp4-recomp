@@ -243,12 +243,28 @@ static int trace_driver; static void* trace_upload_2d; static void* trace_compre
 
 static void APIENTRY driver_debug_message(GLenum source,GLenum type,GLuint id,GLenum severity,GLsizei length,const GLchar*message,const void*arg){
   (void)source;(void)severity;(void)arg;static u32 count;
-  if(type==0x8251)return; /* omit informational buffer-placement messages */
-  if(__atomic_fetch_add(&count,1,__ATOMIC_RELAXED)<256)LOG("GL driver debug: type=%x id=%u %.*s\n",type,id,length>1500?1500:length,message);
+  static int all=-1; if(all<0){ const char* e=getenv("SWR_GL_DRIVER_DEBUG"); all= e && atoi(e)>=2; }   /* 2: everything (shader compile reports too) */
+  if(type==0x8251 && !all)return; /* omit informational buffer-placement messages */
+  if(__atomic_fetch_add(&count,1,__ATOMIC_RELAXED)<(all? 100000u : 256u))LOG("GL driver debug: type=%x id=%u %.*s\n",type,id,length>1500?1500:length,message);
 }
+/* SWR_TRACE_GL_DRIVER: the GL state of a draw the driver took long over (what made it compile a shader variant) */
+static void trace_draw_state(const char* name, const int* args){
+  typedef void (APIENTRY *GI)(GLenum,GLint*); typedef void (APIENTRY *GPI)(GLuint,GLenum,GLint*); typedef GLboolean (APIENTRY *IE)(GLenum);
+  typedef void (APIENTRY *GVA)(GLuint,GLenum,GLint*); typedef void (APIENTRY *GII)(GLenum,GLuint,GLint*);
+  static GI gi; static GPI gpp; static IE ie; static GVA gva; static GII gii;
+  if(!gi){ gi=(GI)backend_gl_proc("glGetIntegerv"); gpp=(GPI)backend_gl_proc("glGetProgramPipelineiv"); ie=(IE)backend_gl_proc("glIsEnabled"); gva=(GVA)backend_gl_proc("glGetVertexAttribiv"); gii=(GII)backend_gl_proc("glGetIntegeri_v"); }
+  GLint prog=0, pipe=0, vs=0, gs=0, fs=0, tcs=0, tes=0; gi(0x8B8D,&prog); gi(0x825A,&pipe);
+  if(pipe){ gpp(pipe,0x8B31,&vs); gpp(pipe,0x8DD9,&gs); gpp(pipe,0x8B30,&fs); gpp(pipe,0x8E88,&tcs); gpp(pipe,0x8E87,&tes); }
+  char at[600]; int o=0; at[0]=0;
+  for(GLuint a=0;a<32 && o<540;a++){ GLint en=0; gva(a,0x8622,&en); if(!en) continue; GLint sz=0, ty=0, nm=0, in=0, dv=0, lg=0; gva(a,0x8623,&sz); gva(a,0x8625,&ty); gva(a,0x886A,&nm); gva(a,0x88FD,&in); gva(a,0x88FE,&dv); gva(a,0x874E,&lg);
+    o+=snprintf(at+o,sizeof at-o," a%u:%dx%x%s%s%s",a,sz,ty,nm?"n":"",in?"i":"",lg?"L":""); if(dv) o+=snprintf(at+o,sizeof at-o,"/d%d",dv); }
+  GLint fb=0; gi(0x8CA6,&fb);
+  LOG("glq draw state: %s mode=%x prog=%d pipeline=%d vs=%d tcs=%d tes=%d gs=%d fs=%d fbo=%d enables: line_smooth=%d poly_smooth=%d sample_shading=%d discard=%d point_size=%d clip0=%d restart=%d ms=%d a2c=%d | attribs%s\n",
+    name,args[0],prog,pipe,vs,tcs,tes,gs,fs,fb,ie(0x0B20),ie(0x0B41),ie(0x8C36),ie(0x8C89),ie(0x8642),ie(0x3000),ie(0x8D69),ie(0x809D),ie(0x809E),at); (void)gii; }
 static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_driver=getenv("SWR_TRACE_GL_DRIVER")!=NULL;
   { extern void plat_thread_high_priority(void); plat_thread_high_priority(); }
   t_glq_direct=1;
+  { extern void plat_sample_this_thread(void); plat_sample_this_thread(); }
   int ok= backend_gl_create() && swr_gl_load(backend_gl_proc);
   extern int swr_gl_is_gles(void);
   if(ok && swr_gl_is_gles()) ok=0;   /* not on GLES */
@@ -284,7 +300,7 @@ static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_
             if(fx==(void*)q_sync_ex){ nm="sync"; QSync* qs=*(QSync**)hd->data; fx=(void*)qs->ex; }
             for(const GlqEnt* e=g_glq_tab;e->name;e++) if(e->execute==fx){ nm=e->name; break; }
             LOG("glq: %s took %.1f ms on the GL thread (fn +%lld)\n",nm,dx/1e6,(long long)((char*)fx-(char*)(void*)glq_start)); } } }
-      if(trace_driver){u64 elapsed=plat_ns()-operation_start;static u32 logged;if(elapsed>10000000ull&&executed!=(void*)e_swap&&logged++<256){const char*name=hd->ex==e_swap?"SwapBuffers":"queue/custom";for(const GlqEnt*entry=g_glq_tab;entry->name;entry++)if(entry->execute==executed){name=entry->name;break;}LOG("glq driver: %s %.2f ms, queued bytes=%llu begin_ns=%llu end_ns=%llu\n",name,elapsed/1e6,(unsigned long long)(__atomic_load_n(&g_qh,__ATOMIC_ACQUIRE)-t),(unsigned long long)operation_start,(unsigned long long)(operation_start+elapsed));if(image_upload)LOG("glq upload detail: level=%d %dx%d format=%x %s=%x\n",upload_info[1],upload_info[4],upload_info[5],upload_info[6],executed==trace_compressed_2d?"bytes":"type",upload_info[7]);}}
+      if(trace_driver){u64 elapsed=plat_ns()-operation_start;static u32 logged;if(elapsed>10000000ull&&executed!=(void*)e_swap&&logged++<256){const char*name=hd->ex==e_swap?"SwapBuffers":"queue/custom";for(const GlqEnt*entry=g_glq_tab;entry->name;entry++)if(entry->execute==executed){name=entry->name;break;}LOG("glq driver: %s %.2f ms, queued bytes=%llu begin_ns=%llu end_ns=%llu\n",name,elapsed/1e6,(unsigned long long)(__atomic_load_n(&g_qh,__ATOMIC_ACQUIRE)-t),(unsigned long long)operation_start,(unsigned long long)(operation_start+elapsed));if(!strncmp(name,"glDraw",6))trace_draw_state(name,(const int*)hd->data);if(image_upload)LOG("glq upload detail: level=%d %dx%d format=%x %s=%x\n",upload_info[1],upload_info[4],upload_info[5],upload_info[6],executed==trace_compressed_2d?"bytes":"type",upload_info[7]);}}
       if(hd->big) free(hd->data);
       t+=sz; __atomic_store_n(&g_qt,t,__ATOMIC_RELEASE);
       if(((++n)&255)==0 && g_vf_list) q_poll_fences(); }
@@ -338,15 +354,27 @@ void glq_occl(int op, int slot, GLuint buf, uintptr_t off){
    here, so a reused name cannot meet a stale entry */
 typedef GLint (APIENTRY *T_gul)(GLuint,const GLchar*); extern T_gul r_glGetUniformLocation;
 typedef void (APIENTRY *T_pu4)(GLuint,GLint,GLsizei,const GLfloat*); extern T_pu4 r_glProgramUniform4fv;
-typedef struct { GLuint p; GLint loc[2]; } ULoc;
+typedef struct { GLuint p; GLint loc[3]; } ULoc;
 static ULoc g_uloc[16384];
 typedef struct { GLuint p; int which; float v[4]; } AUN;
 static void e_pun(void* x){ AUN* a=x; static const char* const nm[2]={"swr_vp","swr_at"}; T_gul gul=r_glGetUniformLocation; T_pu4 pu=r_glProgramUniform4fv;
   if(!gul) gul=(T_gul)backend_gl_proc("glGetUniformLocation"); if(!pu) pu=(T_pu4)backend_gl_proc("glProgramUniform4fv");
   ULoc* e=NULL; u32 h=(a->p*2654435761u)&16383;
-  for(int n=0;n<16384;n++,h=(h+1)&16383){ ULoc* c=&g_uloc[h]; if(c->p==a->p){ e=c; break; } if(!c->p){ c->p=a->p; c->loc[0]=c->loc[1]=-3; e=c; break; } }
+  for(int n=0;n<16384;n++,h=(h+1)&16383){ ULoc* c=&g_uloc[h]; if(c->p==a->p){ e=c; break; } if(!c->p){ c->p=a->p; c->loc[0]=c->loc[1]=c->loc[2]=-3; e=c; break; } }
   GLint loc= e? e->loc[a->which] : -3; if(loc==-3){ loc=gul(a->p,nm[a->which]); if(e) e->loc[a->which]=loc; }
   if(loc>=0) pu(a->p,loc,1,a->v); }
+typedef void (APIENTRY *T_pu4ui)(GLuint,GLint,GLsizei,const GLuint*);
+typedef struct { GLuint p; int n; GLuint v[64]; } AIAP;
+static void e_piap(void* x){ AIAP* a=x; static T_gul gul; static T_pu4ui pu;
+  if(!gul) gul= r_glGetUniformLocation? r_glGetUniformLocation : (T_gul)backend_gl_proc("glGetUniformLocation"); if(!pu) pu=(T_pu4ui)backend_gl_proc("glProgramUniform4uiv");
+  ULoc* e=NULL; u32 h=(a->p*2654435761u)&16383;
+  for(int n=0;n<16384;n++,h=(h+1)&16383){ ULoc* c=&g_uloc[h]; if(c->p==a->p){ e=c; break; } if(!c->p){ c->p=a->p; c->loc[0]=c->loc[1]=c->loc[2]=-3; e=c; break; } }
+  GLint loc= e? e->loc[2] : -3; if(loc==-3){ loc=gul(a->p,"swr_iap"); if(e) e->loc[2]=loc; }
+  if(loc>=0 && pu) pu(a->p,loc,a->n,a->v); }
+void glq_prog_uniform_iap(GLuint prog, int n, const unsigned* v){
+  if(n>16) n=16;
+  if(!g_active || t_glq_direct){ AIAP a; a.p=prog; a.n=n; memcpy(a.v,v,(size_t)n*16); e_piap(&a); return; }
+  AIAP* a=glq_alloc(sizeof *a,0,e_piap); a->p=prog; a->n=n; memcpy(a->v,v,(size_t)n*16); glq_commit(); }
 void glq_prog_uniform_named(GLuint prog, int which, const float* v){
   if(!g_active || t_glq_direct){ AUN a={prog,which,{v[0],v[1],v[2],v[3]}}; e_pun(&a); return; }
   AUN* a=glq_alloc(sizeof *a,0,e_pun); a->p=prog; a->which=which; memcpy(a->v,v,sizeof a->v); glq_commit(); }

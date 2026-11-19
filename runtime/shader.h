@@ -51,4 +51,20 @@ u64 shader_hash(const u8* code, u32 max_bytes, u32* out_len);
    buffers: with 8 the stores to the rest were dropped */
 extern int g_gbuf_max;
 static inline int swr_gb_bind(int slot, int i){ return i<8? slot*8+i : 24+slot*8+(i-8); }
+/* Per-instance vertex attributes the vertex shader reads itself (gpu_gl.c turns it on for radeonsi). radeonsi compiles a
+   vertex shader with any instanced attribute as a separate "monolithic" variant at its first draw, on the thread that
+   draws, and doesn't keep it in its disk cache: 25-40 ms per variant, every time the game starts, and again for each
+   pixel shader or cull mode the vertex shader is later paired with. Prime 4 draws much of its scenery instanced, so it
+   was most of the stutter (area loads and the hitches after). Read from a storage buffer instead, the driver builds
+   these shaders like any other: in the background, once, from its cache after that.
+   g_ia_bind: storage-buffer binding of the first such attribute (0: off); g_vs_ssbo_max: storage blocks a vertex shader
+   may use. g_vs_ia_req: the instanced attributes of the draw (the key; set around shader_to_glsl). swr_ia_mask: the ones
+   a vertex shader with these inputs and global buffers reads itself, k-th attribute at binding g_ia_bind+k (the rest
+   keep a hardware divisor) */
+extern int g_ia_bind, g_vs_ssbo_max; extern __thread u32 g_vs_ia_req; extern const char g_ia_glsl[], g_ia_fetch[];
+static inline u32 swr_ia_mask(u32 req, u32 in_mask, int ngbuf){
+  if(!g_ia_bind) return 0;
+  u32 f=req&in_mask&0xFFFFu, o=0; int avail=g_vs_ssbo_max-ngbuf;
+  for(int i=0;i<16 && avail>0;i++) if((f>>i)&1){ o|=1u<<i; avail--; }
+  return o; }
 #endif
