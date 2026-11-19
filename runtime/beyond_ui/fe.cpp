@@ -661,6 +661,82 @@ static void page_mods() {
     help_text("A mod is a folder with a 'romfs' inside, laid out like the game's own RomFS. Atmosphere-style zips (atmosphere/contents/010019A01E2F2000/romfs) are recognised.");
 }
 
+// ---------------------------------------------------------------- EXTRACT SHADERS (Linux): Advanced > Shaders, and its dialog
+// The game program reads the player's own game files and translates their shaders into shader_cache
+// (runtime/shader_extract.inc; fe_sys_linux.cpp shaders_start); the dialog shows its progress lines
+static bool g_xs_open, g_xs_focus;
+#ifndef _WIN32
+static SetupJob g_xjob; static double g_xjob_t1;
+struct XsStatus { bool have = false; std::string date; long programs = 0, translations = 0; double mb = 0; };
+static XsStatus xs_status(bool refresh = false) {   // shader_cache/extracted.txt, written when an extraction finished
+    static XsStatus s; static double at = -10;
+    if (!refresh && ImGui::GetTime() - at < 2) return s;
+    at = ImGui::GetTime(); s = XsStatus();
+    std::string t = read_text(join(P.exedir, "shader_cache/extracted.txt")), file;
+    for (size_t i = 0; i < t.size();) {
+        size_t e = t.find('\n', i); if (e == std::string::npos) e = t.size();
+        std::string l = t.substr(i, e - i); i = e + 1; size_t sp = l.find(' '); if (sp == std::string::npos) continue;
+        std::string k = l.substr(0, sp), v = l.substr(sp + 1);
+        if (k == "file") file = v; else if (k == "date") s.date = v; else if (k == "programs") s.programs = atol(v.c_str());
+        else if (k == "translations") s.translations = atol(v.c_str()); else if (k == "megabytes") s.mb = atof(v.c_str());
+    }
+    // the store is named after the shader translator's version: after an update that changed it, the game removes the old one
+    s.have = !file.empty() && file.find('/') == std::string::npos && file_exists(join(P.exedir, "shader_cache/" + file));
+    return s;
+}
+static void xs_begin() { g_xjob = SetupJob(); g_xjob.t0 = ImGui::GetTime(); shaders_start(g_xjob); g_xs_open = true; g_xs_focus = true; }
+static void xs_rows() {
+    XsStatus s = xs_status();
+    row_text("Extracted from your game files", s.have ? fmt("%ld shaders, %.0f MB (%s)", s.programs, s.mb, s.date.c_str()).c_str() : "Not yet");
+    if (row_button("##xs", "Extract the shaders from your game files", s.have ? "AGAIN" : "EXTRACT")) xs_begin();
+    help_text("Reads your own game files and translates every shader in them ahead of time, so the game has them ready when an area loads. "
+              "Takes a few minutes; extract them again after an update. Your graphics driver still compiles each shader the first time it is loaded, in the background.");
+}
+static void xs_dialog(float W, float H) {
+    setup_lock();
+    float pct = g_xjob.pct; std::string stage = g_xjob.stage, msg = g_xjob.message, err = g_xjob.error; bool running = g_xjob.running, done = g_xjob.done, failed = g_xjob.failed;
+    setup_unlock();
+    bool over = !running, ok = over && done && !failed;
+    static bool was_running;
+    if (was_running && over) { g_xjob_t1 = ImGui::GetTime(); xs_status(true); g_xs_focus = true; flash(ok ? "Shaders extracted" : "Shader extraction stopped");
+        if (!ok) remove(join(P.exedir, "shader_cache/extracted.tmp").c_str()); }   // what a stopped run had written
+    was_running = running;
+    nav_frame_begin();   // the page behind stays drawn, but up / down only move between the dialog's buttons
+    if (g_xs_focus) { g_focus_first = true; g_xs_focus = false; }
+    ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({W, H});
+    ImGui::Begin("##xsdlg", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    ImDrawList* dl = ImGui::GetWindowDrawList(); dl->AddRectFilled({0, 0}, {W, H}, IM_COL32(0, 0, 0, 175));
+    float pw = std::min(S(1000), W - S(60)), ph = std::min(S(500), H - S(60)); ImVec2 a((W - pw) / 2, (H - ph) / 2), b(a.x + pw, a.y + ph);
+    chamfer_rect(dl, a, b, S(14), IM_COL32(9, 15, 27, 250), C_CYAN, 1.5f);
+    ImGui::SetCursorScreenPos({a.x + S(40), a.y + S(30)});
+    ImGui::BeginChild("##xsbody", {pw - S(80), ph - S(50)}, 0, ImGuiWindowFlags_NoBackground);
+    page_title(ok ? "SHADERS EXTRACTED" : over ? "EXTRACTION STOPPED" : "EXTRACTING SHADERS",
+               ok ? "The game reads them from its shader_cache folder when it needs them." :
+               over ? "" : "Reading your game files and translating every shader in them. You can leave this running.");
+    double el = (over ? g_xjob_t1 : ImGui::GetTime()) - g_xjob.t0;
+    progress_bar(ok ? 1.0f : pct / 100.0f, {ImGui::GetContentRegionAvail().x, S(54)},
+                 ok ? "100%  \xE2\x80\x94  Done" : fmt("%.0f%%  \xE2\x80\x94  %s", pct, stage.c_str()).c_str());
+    std::string eta = pct > 3 && running ? fmt("   \xC2\xB7   about %d min left", (int)ceil(el * (100 - pct) / pct / 60)) : "";
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(C_DIM));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ImGui::Text("%s   \xC2\xB7   %d:%02d%s%s", msg.c_str(), (int)el / 60, (int)el % 60, over ? "" : " elapsed", eta.c_str());
+    ImGui::PopTextWrapPos(); ImGui::PopStyleColor();
+    if (over && !ok) {
+        ImGui::Dummy({1, S(6)}); ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(C_RED_HI));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x); ImGui::TextUnformatted(err.c_str()); ImGui::PopTextWrapPos(); ImGui::PopStyleColor();
+    }
+    ImGui::Dummy({1, S(18)});
+    if (running) { if (row_button("##xscancel", "Stop extracting (nothing is kept; the game works as before)", "CANCEL")) setup_cancel(g_xjob); }
+    else {
+        if (big_button("##xsclose", "CLOSE", {S(280), S(60)})) g_xs_open = false;
+        if (!ok && row_button("##xslog", "Open the log (shaders.log)", "OPEN")) open_in_notepad(join(P.exedir, "shaders.log"));
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+#endif
+
 static void page_advanced() {
     page_title("ADVANCED", "Shaders, CPU, memory, diagnostics and recommendations.");
     section("RECOMMENDED FOR THIS PC");
@@ -673,6 +749,9 @@ static void page_advanced() {
         if (!r.note.empty()) help_text(r.note.c_str());
     }
     section("SHADERS"); draw_opt("wait_for_shaders"); draw_opt("prebuild_shaders"); draw_opt("low_priority_shader_compiler");
+#ifndef _WIN32
+    xs_rows();
+#endif
     section("CPU"); draw_opt("sleep_waits"); draw_opt("texture_threads");
     section("MEMORY"); draw_opt("memory_gb");
 #ifdef _WIN32   // the F7 recorder is Media Foundation
@@ -765,6 +844,9 @@ static void frame() {
         }
         ImGui::EndChild();
         ImGui::End();
+#ifndef _WIN32
+        if (g_xs_open) xs_dialog(W, H - S(70));
+#endif
     }
     // footer: prompts and messages
     ImGui::SetNextWindowPos({0, H - S(70)}); ImGui::SetNextWindowSize({W, S(70)});
@@ -802,7 +884,11 @@ static void handle_nav() {
     g_row.pad_right = g_nav.right || ImGui::IsKeyPressed(ImGuiKey_RightArrow);
     g_row.confirm = g_nav.act[NAV_CONFIRM];
     bool back = g_nav.act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape);
-    if (g_page != PG_SETUP) {
+    if (g_xs_open) {   // the EXTRACT SHADERS dialog: Back closes it once it has finished; no page changes under it
+#ifndef _WIN32
+        if (back && !g_xjob.running) g_xs_open = false;
+#endif
+    } else if (g_page != PG_SETUP) {
         if (g_nav.act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) go((Page)(g_page <= PG_PLAY ? PG_ABOUT : g_page - 1));
         if (g_nav.act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) go((Page)(g_page >= PG_ABOUT ? PG_PLAY : g_page + 1));
         if (back && g_page != PG_PLAY) go(PG_PLAY);
@@ -881,6 +967,17 @@ static void test_tick() {
         if (g_ss == SS_DONE && g_restart_after_setup) { g_do_restart = true; g_quit = true; }
         if ((u.stage == UP_CURRENT || u.stage == UP_ERROR || g_ss == SS_FAILED) && !g_job.running) g_quit = true;   // test over
     }
+#ifndef _WIN32
+    if (getenv("SWR_FE_EXTRACT")) {   // opens Advanced and presses EXTRACT; quits a few seconds after it finished
+        static int st; static double t_end;
+        if (st == 0 && g_frame_no >= 20) { go(PG_ADVANCED); st = 1; }
+        else if (st == 1 && g_frame_no >= 40) { xs_begin(); st = 2; }
+        else if (st == 2 && !g_xjob.running) { t_end = ImGui::GetTime(); st = 3; }
+        else if (st == 3 && ImGui::GetTime() - t_end > 3) { const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+            if (f) { XsStatus s = xs_status(true); fprintf(f, "extract done=%d failed=%d error=%s have=%d programs=%ld translations=%ld mb=%.0f\n", (int)g_xjob.done, (int)g_xjob.failed, g_xjob.error.c_str(), s.have, s.programs, s.translations, s.mb); fclose(f); }
+            g_quit = true; }
+    }
+#endif
     static const char* rp = getenv("SWR_FE_RESULT"); static double last;
     static unsigned last_nav;
     ImGuiContext& gx = *ImGui::GetCurrentContext();

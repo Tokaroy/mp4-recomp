@@ -1138,6 +1138,8 @@ static void aw_write(const char* path, const void* d, size_t n, int append);
 typedef struct {u32 idx,off,value;} TransDep;
 typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep dep[128];struct Translated*next;} Translated;
 static Translated* translated[512];static u32 translated_count,translated_hits;
+/* the store of shaders extracted from the game files (shader_extract.inc) */
+extern int g_xs; static u32 g_xs_loaded; static void xs_open(void); static Translated* xs_lookup(u64 key); static void xs_store(u64 key,const ShaderInfo* si,const char* src);
 static TransDep trans_dep[128];static u32 trans_ndep;static int trans_overflow;
 static int trans_cb_read(u32 idx,u32 off,u32*out){
   int ok=sh_cb_read(idx,off,out);/* Record failed reads too: their availability can change. */
@@ -1147,6 +1149,7 @@ static int trans_cb_read(u32 idx,u32 off,u32*out){
 }
 static void translated_put(Translated*t){u32 b=(u32)(t->key^(t->key>>32))&511;t->next=translated[b];translated[b]=t;translated_count++;}
 static void translated_load(void){
+  xs_open(); if(g_xs) return;   /* extracting: every shader is translated and stored, none taken from this cache */
   FILE*f=fopen(TRANSLATED_PATH,"rb");if(!f)return;
   for(;;){u32 hd[5];u64 key;if(fread(hd,sizeof hd,1,f)!=1)break;
     if(hd[0]!=0x544c4753||hd[1]!=TR_VERSION||hd[2]!=sizeof(ShaderInfo)||hd[3]>(8u<<20)||hd[4]>128||fread(&key,8,1,f)!=1)break;
@@ -1165,10 +1168,15 @@ static Translated*translated_get(u64 key){
   for(Translated*t=translated[(u32)(key^(key>>32))&511];t;t=t->next)if(t->key==key){
     int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v;if(!sh_cb_read(t->dep[i].idx,t->dep[i].off,&v)||v!=t->dep[i].value){ok=0;break;}}
     if(ok){translated_hits++;return t;}
-  }return NULL;
+  }
+  {Translated*t=xs_lookup(key);   /* extracted from the game files: read on first use */
+   if(t){int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v;if(!sh_cb_read(t->dep[i].idx,t->dep[i].off,&v)||v!=t->dep[i].value){ok=0;break;}} if(ok){translated_hits++;return t;}}}
+  return NULL;
 }
 static void translated_save(u64 key,const ShaderInfo*si,const char*src){
-  if(!src||trans_overflow)return;u32 n=(u32)strlen(src);Translated*t=calloc(1,sizeof*t);t->key=key;t->si=*si;t->src=malloc((size_t)n+1);memcpy(t->src,src,(size_t)n+1);t->ndep=trans_ndep;memcpy(t->dep,trans_dep,t->ndep*sizeof(TransDep));translated_put(t);
+  if(!src||trans_overflow)return;
+  if(g_xs){xs_store(key,si,src);return;}   /* extracting: into the store, not kept in memory */
+  u32 n=(u32)strlen(src);Translated*t=calloc(1,sizeof*t);t->key=key;t->si=*si;t->src=malloc((size_t)n+1);memcpy(t->src,src,(size_t)n+1);t->ndep=trans_ndep;memcpy(t->dep,trans_dep,t->ndep*sizeof(TransDep));translated_put(t);
   u32 hd[5]={0x544c4753,TR_VERSION,sizeof(ShaderInfo),n,t->ndep};size_t bytes=sizeof hd+8+sizeof *si+t->ndep*sizeof(TransDep)+n;u8*d=malloc(bytes),*q=d;
   memcpy(q,hd,sizeof hd);q+=sizeof hd;memcpy(q,&key,8);q+=8;memcpy(q,si,sizeof *si);q+=sizeof *si;memcpy(q,t->dep,t->ndep*sizeof(TransDep));q+=t->ndep*sizeof(TransDep);memcpy(q,src,n);
   aw_write(TRANSLATED_PATH,d,bytes,1);free(d);
@@ -4028,7 +4036,7 @@ static void mp_scan_thread(void* arg){ plat_diag_role("shader-scan"); (void)arg;
       while(plat_ns()<until){ if(__atomic_exchange_n(&g_mp_wake,0,__ATOMIC_ACQ_REL)){ woke=1; break; } plat_sleep_ns(20000000); } } } }
 static void mem_prebuild_step(void){
   if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && g_worker==1 && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
-    if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0; }
+    if(g_mp_on){ pm_init(&g_mp_m); if(!g_xs && plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0; }   /* extracting: the files are the scan */
     LOG("shaders: pre-build from GPU memory %s\n",g_mp_on? "on (shaders are built as soon as the game loads them, before it draws with them)" : "off"); }
   if(!g_mp_on) return;
   /* finished compiles: keep the program ready for the game's first draw */
@@ -4070,6 +4078,7 @@ static void mem_prebuild_step(void){
       if(vtm){ nv=2; free(src); g_mp_found--; continue; } }
     if(!v && stage==ST_VS && !getenv("SWR_NO_PREBUILD_INTTEX") && (vtm=vs_guess_int_attrs(src))){ nv=2; free(src); g_mp_found--; continue; }
     { static int dp=-1; if(dp<0) dp=getenv("SWR_DUMP_PREBUILD")!=NULL; if(dp && stage==ST_VS){ char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/pb"); snprintf(fp,sizeof fp,"captures/pb/%016llx_vs.glsl",(unsigned long long)h); FILE* f=fopen(fp,"w"); if(f){ fputs(src,f); fclose(f); } } }
+    if(g_xs){ free(src); g_mp_built++; continue; }   /* extracting: translated and stored, nothing compiled */
     if(stage==ST_VS) src=dlg_vs_xfb(src);
     Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=stage; tmp.hash=h; tmp.src=src; u64 key=sh_key(&tmp);
     pack_add_sh(key,&tmp);
@@ -4081,8 +4090,10 @@ static void mem_prebuild_step(void){
     g_mpj[g_mpj_n++]=(MpJob){j,key,stage}; }
     free(mp.code); }
   g_mp_ns+=plat_ns()-t0;
-  if(g_mp_found && g_mp_found==g_mp_built+g_mp_failed+g_mp_claimed && g_mp_logged!=g_mp_found){ g_mp_logged=g_mp_found;
+  if(!g_xs && g_mp_found && g_mp_found==g_mp_built+g_mp_failed+g_mp_claimed && g_mp_logged!=g_mp_found){   /* extracting: its own summary */ g_mp_logged=g_mp_found;
     LOG("shaders: pre-build from GPU memory: %u programs ready (%u from the cache), %u failed; %.0f ms of translating on the GL thread; drawn before the pre-build got to them: %u built by the draw, %u joined a compile in progress (%.0f ms waited)\n",g_mp_built,g_mp_had,g_mp_failed,g_mp_ns/1e6,g_mp_claimed,g_mp_joined,g_mp_wait_ns/1e6); } }
+
+#include "shader_extract.inc"
 
 static FILE* g_rf; static u64 g_rf_t0;
 static u64 g_fr_t0, g_fr_max; static int g_fr_slow; static u64 g_fr_shnew;
@@ -4231,6 +4242,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
   LOG("gpu: texture multi-bind %s, persistent constant ring %s\n",p_bt? "yes" : "no",g_ur_ptr? "yes" : "no");
   warm_load();
   prebuild_shaders();
+  if(g_xs){ g_gl=1; g_gl_ready=1; xs_run(); }   /* --extract-shaders: translate the game files' shaders, then main.c exits */
   FILE*work_trace=NULL;const char*work_path=getenv("SWR_TRACE_GPU_WORK");
   if(work_path&&work_path[0]){work_trace=fopen(work_path,"w");if(work_trace)fprintf(work_trace,"kind,frame,queued_ns,dequeued_ns,finished_ns,queue_ms,execute_ms,cpu_ms\n");}
   unsigned work_trace_rows=0;
@@ -4271,7 +4283,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
                 {extern volatile u64 g_fs_read_ns,g_fs_lock_ns,g_fs_open_ns,g_fs_read_calls,g_fs_read_bytes,g_guest_poll_ns,g_guest_poll_calls;
                   static u64 io0,lock0,open0,call0,bytes0,poll0,pcall0;
                   u64 io=g_fs_read_ns,lk=g_fs_lock_ns,op=g_fs_open_ns,n=g_fs_read_calls,by=g_fs_read_bytes,po=g_guest_poll_ns,pn=g_guest_poll_calls;
-                  fprintf(rf,"      asset IO: %llu calls, %.1f MB, %.1f ms total, %.1f ms lock wait, %.1f ms open; main load-group sleeps: %llu / %.1f ms; warmed programs used %u/%u\n",(unsigned long long)(n-call0),(by-bytes0)/1048576.0,(io-io0)/1e6,(lk-lock0)/1e6,(op-open0)/1e6,(unsigned long long)(pn-pcall0),(po-poll0)/1e6,warm_stage_used,warm_stage_count);fprintf(rf,"      translated shader cache: %u reused / %u stored\n",translated_hits,translated_count);{static u64 ha0,tr0,re0,un0;fprintf(rf,"      shader work totals: hash %.2f ms, translate %.2f ms, reuse %.2f ms, uniform query %.2f ms\n",(shader_hash_ns-ha0)/1e6,(shader_translate_ns-tr0)/1e6,(shader_reuse_ns-re0)/1e6,(shader_uniform_ns-un0)/1e6);ha0=shader_hash_ns;tr0=shader_translate_ns;re0=shader_reuse_ns;un0=shader_uniform_ns;}{static u64 na0,nb0,nw0;fprintf(rf,"      GL object names: %llu allocated, %llu queue round trips, %.2f ms waiting\n",(unsigned long long)(name_allocations-na0),(unsigned long long)(name_batches-nb0),(name_wait_ns-nw0)/1e6);na0=name_allocations;nb0=name_batches;nw0=name_wait_ns;}
+                  fprintf(rf,"      asset IO: %llu calls, %.1f MB, %.1f ms total, %.1f ms lock wait, %.1f ms open; main load-group sleeps: %llu / %.1f ms; warmed programs used %u/%u\n",(unsigned long long)(n-call0),(by-bytes0)/1048576.0,(io-io0)/1e6,(lk-lock0)/1e6,(op-open0)/1e6,(unsigned long long)(pn-pcall0),(po-poll0)/1e6,warm_stage_used,warm_stage_count);fprintf(rf,"      translated shader cache: %u reused / %u stored, %u of them read from the extracted shaders\n",translated_hits,translated_count,g_xs_loaded);{static u64 ha0,tr0,re0,un0;fprintf(rf,"      shader work totals: hash %.2f ms, translate %.2f ms, reuse %.2f ms, uniform query %.2f ms\n",(shader_hash_ns-ha0)/1e6,(shader_translate_ns-tr0)/1e6,(shader_reuse_ns-re0)/1e6,(shader_uniform_ns-un0)/1e6);ha0=shader_hash_ns;tr0=shader_translate_ns;re0=shader_reuse_ns;un0=shader_uniform_ns;}{static u64 na0,nb0,nw0;fprintf(rf,"      GL object names: %llu allocated, %llu queue round trips, %.2f ms waiting\n",(unsigned long long)(name_allocations-na0),(unsigned long long)(name_batches-nb0),(name_wait_ns-nw0)/1e6);na0=name_allocations;nb0=name_batches;nw0=name_wait_ns;}
                   {static u64 previous[5]; double elapsed[5]; extern int g_frames,g_opt_fps; static int previous_presented; int presented=g_frames; fprintf(rf,"      frame cap: active fps_limit=%d, guest presents=%d, GPU presents=%llu in %.3f seconds\n",g_opt_fps,presented-previous_presented,(unsigned long long)frn,dtn/1e9); previous_presented=presented; {static u64 sc0,sn0;fprintf(rf,"      sampler name requests: %llu calls, %.2f ms\n",(unsigned long long)(sampler_query_calls-sc0),(sampler_query_ns-sn0)/1e6);sc0=sampler_query_calls;sn0=sampler_query_ns;} {static u64 last_total,last_names,last_storage,last_calls;fprintf(rf,"      texture creation: %llu objects, %.2f ms total, %.2f names/bind, %.2f storage submission\n",(unsigned long long)(tex_creation_calls-last_calls),(tex_creation_ns-last_total)/1e6,(tex_creation_names_ns-last_names)/1e6,(tex_creation_storage_ns-last_storage)/1e6);last_total=tex_creation_ns;last_names=tex_creation_names_ns;last_storage=tex_creation_storage_ns;last_calls=tex_creation_calls;} {static u64 previous_allocations;fprintf(rf,"      upload scratch: %llu allocation calls, %.1f MB retained\n",(unsigned long long)(upload_allocations-previous_allocations),(upload_linear.capacity+upload_source.capacity+upload_decoded.capacity)/1048576.0);previous_allocations=upload_allocations;} for(int j=0;j<5;j++){elapsed[j]=(tex_stage_totals[j]-previous[j])/1e6; previous[j]=tex_stage_totals[j];} fprintf(rf,"      texture upload totals: %.2f ms, read %.2f, unpack %.2f, decode %.2f, driver %.2f\n",elapsed[0],elapsed[1],elapsed[2],elapsed[3],elapsed[4]);}
                   io0=io;lock0=lk;open0=op;call0=n;bytes0=by;poll0=po;pcall0=pn;}
                 { static u64 l_lg, l_lns; u64 ng=st_lsfg_gen-l_lg; if(ng){ fprintf(rf,"      frame generation (LSFG): +%llu frames -> %.1f FPS on screen, %.1f ms of GPU thread per generated frame\n",

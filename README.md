@@ -240,6 +240,16 @@ from the same save), traced to a root cause and checked again in the game.
 
 ### Shaders
 
+- **Extract shaders (Linux, Advanced > Shaders > EXTRACT).** Reads your own game files and translates every shader in
+  them ahead of time, with a progress dialog. The game keeps most of its shaders packed inside its area files; the
+  extraction finds all 68,404 of them and saves the 38,178 translations that don't depend on the game's running state to
+  `shader_cache/extracted_v<version>.bin` (131 MB). The game reads only that file's index at start and a translation the
+  first time it needs it. It takes about 2 minutes on a Ryzen 9 7900X3D with an NVMe drive (it reads all 27 GB of the
+  game's files once; expect longer on a Steam Deck or an SD card) and needs `libzstd` (the `zstd` package). Nothing is
+  compiled: the graphics driver still compiles each shader in the background when an area loads it. The gain is small:
+  in the Ice Belt area-load test the pre-build's translating time fell from 1.26 s to 0.70 s, and the stutter was the
+  same within measurement noise. Extract again after an update that changes the shader translator (the old file is
+  removed then).
 - **Shaders built before the game draws with them.** The game unpacks its shaders into GPU memory when an area loads; a
   scanner thread finds them, the GL thread translates a few per frame, and compile threads build them so they're ready
   before the first draw.
@@ -329,11 +339,11 @@ from the same save), traced to a root cause and checked again in the game.
 
 ## Known issues
 
-- **Driver shader-variant compiles (AMD/radeonsi).** The first time a shader program is drawn, radeonsi builds the
-  machine-code variant that draw needs, on the thread that runs the draw, 25–30 ms for big shaders, and doesn't keep it
-  in its disk cache. This is now the main source of remaining hitches: a few per area, mostly as it loads in. It often
-  surfaces in the log as a slow `glTexSubImage2D`, but the upload isn't the cause. Not fixable from the game side so
-  far.
+- **Driver shader-variant compiles (AMD/radeonsi).** radeonsi compiled a separate version of every vertex shader that
+  reads per-instance data, on the drawing thread and without caching it (25–40 ms each, on every launch). Those shaders
+  now read that data themselves, which removed most of the area-change hitches (16 slow frames to 2 in the Ice Belt
+  test); `SWR_INSTANCE_FETCH=0` turns this off. A first launch after updating still shows some objects a moment late
+  while the new versions compile once.
 - **First visit to a new area** can still compile a handful of shaders the game loads moments before drawing them.
 - **Loading a save** freezes for about 0.5 s while the lighting volumes upload.
 - **The FOV slider** has no effect yet (the camera address for this build hasn't been found).
@@ -363,6 +373,7 @@ Environment variables for testing and for turning individual fixes off if one ev
 | `SWR_NO_BRX_STANDIN=1` | compile indirect-branch shaders at the draw instead of using the pre-built stand-in |
 | `SWR_NO_SCAN_WAKE=1` | scanner keeps its fixed schedule |
 | `SWR_NO_MEM_PREBUILD=1` | turn the shader pre-build off |
+| `SWR_INSTANCE_FETCH=0` | let the driver fetch per-instance vertex data (radeonsi; the old path) |
 | `SWR_NO_PREBUILD_INTTEX=1` | pre-build plain variants only |
 | `SWR_NO_NAN_GUARD=1` | keep NaN pixel outputs |
 | `SWR_ASTC_SYNC=1` | decode ASTC on the GPU thread |

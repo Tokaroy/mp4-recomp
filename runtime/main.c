@@ -745,10 +745,14 @@ static void split_path(const char* argv0){
   if(s){ s[1]=0; strncpy(g_exedir,p,1023); } else g_exedir[0]=0;
 }
 
+int g_xs; volatile int g_xs_done, g_xs_rc;   /* --extract-shaders (gpu_gl.c shader_extract.inc) */
 int swr_main(int argc, char** argv){
   /* setup's game-file reader (nxextract.c): an .xci / .nsp to exefs + romfs folders, then exit */
   if(argc>1 && !strcmp(argv[1],"--nx-extract")){ extern int nx_extract_main(int,char**); return nx_extract_main(argc-1,argv+1); }
   split_path(argv[0]);
+  /* the launcher's EXTRACT SHADERS: no Play screen, no game, the window hidden; the shaders of the game files are
+     translated into shader_cache (gpu_gl.c, shader_extract.inc), with progress on stdout, then exit */
+  if(argc>1 && !strcmp(argv[1],"--extract-shaders")) g_xs=1;
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   pm_init(&g_setq_lock); g_setq_init=1;
@@ -756,9 +760,9 @@ int swr_main(int argc, char** argv){
   { /* Play screen / first-run setup in the game window (beyond_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */
     extern int backend_frontend(int argc, char** argv, const char* exedir, const char* exename);
 #ifdef _WIN32
-    if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); TerminateProcess(GetCurrentProcess(),0); } }
+    if(!g_xs && backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); TerminateProcess(GetCurrentProcess(),0); } }
 #else
-    if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); _exit(0); } }
+    if(!g_xs && backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); _exit(0); } }
 #endif
 #endif
   ini_open(ini);
@@ -790,6 +794,11 @@ int swr_main(int argc, char** argv){
     LOG("npdm: system resource %.1f MB\n",g_sysres_size/1048576.0); }
   services_init(); romfs_init(); gpu_init(); { extern void snxvk_gpu_init(void); snxvk_gpu_init(); }
   video_init(g_mod->title? g_mod->title : g_exename);
+  if(g_xs){ while(!__atomic_load_n(&g_xs_done,__ATOMIC_ACQUIRE)) plat_sleep_ns(50000000); LOG("Exit.\n"); log_flush(); fflush(NULL);
+#if defined(_WIN32)
+    TerminateProcess(GetCurrentProcess(),(UINT)g_xs_rc);
+#endif
+    _exit(g_xs_rc); }
   { extern void plat_prof_start(int); if(g_opt_prof){ plat_prof_start(0); LOG("profile: active (profile.txt every 10 s)\n"); } }
   kernel_run_main(g_mod->mods[0].base+g_mod->mods[0].text_off,g_mod->main_stack?g_mod->main_stack:0x100000,(int)g_mod->main_prio,(int)g_mod->main_core);
   plat_thread_diag_start();

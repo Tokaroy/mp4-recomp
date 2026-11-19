@@ -164,7 +164,7 @@ void video_init(const char* title){
   XkbSetDetectableAutoRepeat(dpy,True,NULL);
   /* start fullscreen: the window manager reads the state when the window is mapped */
   if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); g_fullscreen=1; }
-  XMapWindow(dpy,win); XFlush(dpy);
+  { extern int g_xs; if(!g_xs) XMapWindow(dpy,win); XFlush(dpy); }   /* extracting shaders (--extract-shaders): no window shown */
   sdl_load();
   g_start=plat_ns();
   extern void gpu_gl_start(void); gpu_gl_start();

@@ -64,8 +64,10 @@ struct SetupJob {
     volatile float pct = 0; volatile bool running = false, done = false, failed = false, cancelled = false;
     std::string stage, message, error; std::vector<std::string> log; double t0 = 0;
     void* proc = nullptr;
+    std::string logname = "setup.log";      // where its output is kept, in the game's folder
 };
 bool setup_start(SetupJob& j);
+bool shaders_start(SetupJob& j);   // Linux: the game program with --extract-shaders (Advanced > Shaders), same progress lines
 void setup_cancel(SetupJob& j);
 void setup_lock(); void setup_unlock();
 std::string recompiler_python();

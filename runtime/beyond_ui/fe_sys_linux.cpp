@@ -249,7 +249,7 @@ std::string recompiler_python() { std::string p = join(P.recompiler, "python/bin
 
 static void reader(SetupJob* jp, int rd, pid_t pid) {
     SetupJob& j = *jp; std::string buf; char b[4096]; ssize_t n;
-    FILE* lf = fopen(join(P.exedir, "setup.log").c_str(), "ab");
+    FILE* lf = fopen(join(P.exedir, j.logname).c_str(), "ab");
     while ((n = read(rd, b, sizeof b)) > 0) {
         buf.append(b, (size_t)n); size_t e;
         while ((e = buf.find('\n')) != std::string::npos) {
@@ -268,8 +268,9 @@ static void reader(SetupJob* jp, int rd, pid_t pid) {
     close(rd);
     int st = 0; waitpid(pid, &st, 0); int code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
     setup_lock();
-    if (!j.done && !j.failed) { j.failed = true; if (j.error.empty()) j.error = j.cancelled ? "Cancelled." : "The recompiler stopped unexpectedly (exit code " + std::to_string(code) + ")."; }
-    if (code != 0 && !j.cancelled && j.error.empty()) j.error = "The compiler stopped with an error (see the log).";
+    std::string who = j.logname == "shaders.log" ? "The shader extraction" : "The recompiler";
+    if (!j.done && !j.failed) { j.failed = true; if (j.error.empty()) j.error = j.cancelled ? "Cancelled." : who + " stopped unexpectedly (exit code " + std::to_string(code) + "): see " + j.logname + "."; }
+    if (code != 0 && !j.cancelled && j.error.empty()) j.error = who + " stopped with an error (see " + j.logname + ").";
     j.running = false; j.proc = nullptr;
     setup_unlock();
     if (lf) fclose(lf);
@@ -297,6 +298,30 @@ bool setup_start(SetupJob& j) {
     }
     close(fd[1]);
     if (pid < 0) { close(fd[0]); j.running = false; j.failed = true; j.error = "Could not start the recompiler."; return false; }
+    setpgid(pid, pid);
+    j.proc = (void*)(intptr_t)pid;
+    std::thread(reader, &j, fd[0], pid).detach();
+    return true;
+}
+// EXTRACT SHADERS: the game program itself, with no game and its window hidden, reads the game files and translates their
+// shaders into shader_cache (runtime/shader_extract.inc). Its own process group (cancel ends it) at low priority
+bool shaders_start(SetupJob& j) {
+    j.logname = "shaders.log";
+    if (!file_exists(P.exe)) { j.failed = true; j.error = "The game program is missing: " + P.exe + "."; return false; }
+    int fd[2]; if (pipe(fd)) { j.failed = true; j.error = "Could not start the game program."; return false; }
+    j.log.clear(); j.error.clear(); j.pct = 0; j.done = j.failed = j.cancelled = false; j.running = true; j.stage = "Starting"; j.message = "";
+    { FILE* f = fopen(join(P.exedir, j.logname).c_str(), "ab"); if (f) { fprintf(f, "\n===== extract shaders %s =====\n", now_stamp().c_str()); fclose(f); } }
+    pid_t pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0); setpriority(PRIO_PROCESS, 0, 10);
+        int nul = open("/dev/null", O_RDONLY); if (nul >= 0) dup2(nul, 0);
+        dup2(fd[1], 1); dup2(fd[1], 2); close(fd[0]); close(fd[1]);
+        if (chdir(P.exedir.c_str())) {}
+        execl(P.exe.c_str(), P.exe.c_str(), "--extract-shaders", (char*)nullptr);
+        fprintf(stderr, "@@E Could not start %s: %s\n", P.exe.c_str(), strerror(errno)); _exit(127);
+    }
+    close(fd[1]);
+    if (pid < 0) { close(fd[0]); j.running = false; j.failed = true; j.error = "Could not start the game program."; return false; }
     setpgid(pid, pid);
     j.proc = (void*)(intptr_t)pid;
     std::thread(reader, &j, fd[0], pid).detach();
