@@ -126,6 +126,13 @@ downloaded to a PC.
 
 - Controllers work through SDL2 (tested with an Xbox Series X controller; **ZL is the left trigger**).
 - Keyboard: WASD to move, **1** = ZL, **3** = ZR.
+- **Mouse look:** click the game window to capture the mouse (**Esc** lets it go; a second Esc quits). By default the
+  mouse pushes the camera stick, which works right away. For 1:1 aiming, set Mouse look to **Motion** (F1 menu >
+  Controls, or the launcher's Controls page) and turn on the game's own **Settings > Camera > Enable Motion Controls**
+  (open the game's menu with −: Back / View on a controller, Backspace on the keyboard): the mouse is then reported as
+  the controller's motion sensor, and the game's Motion Control Sensitivity sliders set the speed too. Buttons: left =
+  ZR (shoot), right = ZL (lock on), middle = R (missiles), back = L; change them with `mouse_buttons` in the settings
+  file.
 - **F1** or the Home / Guide button opens the in-game menu (settings, cheats, FOV, upscaling).
 - **F3** saves a screenshot to `captures/`, **F4** toggles the 60 fps limit, **F5** writes a frame trace for bug
   reports, **F11** toggles fullscreen.

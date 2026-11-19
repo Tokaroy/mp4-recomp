@@ -545,9 +545,12 @@ static std::vector<Opt> build_options() {
     I("volume", "Audio", "Audio", "Master volume", LIVE_YES, "100", 0, 200, 5, "");
     B("audio_surround_downmix", "Performance", "Audio", "Mix all six surround channels into stereo (off drops the center channel: no dialogue)", LIVE_YES, "1", "");
     // Controls
-    B("mouse_aim", "Input", "Controls", "Mouse free aim", LIVE_YES, "1",
-      "Hold the right mouse button and move the mouse to aim in any direction. Left click shoots, middle click arms missiles.");
-    I("mouse_sensitivity", "Input", "Controls", "Mouse aim sensitivity", LIVE_YES, "100", 25, 400, 5, "Percent: higher turns the aim with less mouse movement.");
+    C("mouse_aim", "Input", "Controls", "Mouse look", LIVE_YES, "1",
+      {{"1", "Camera stick"}, {"2", "Motion (1:1, needs a game setting)"}, {"0", "Off"}},
+      "Click the game window to capture the mouse, Esc to let it go. Camera stick works right away. Motion follows the mouse 1:1 and is more precise, "
+      "but needs the game's Settings > Camera > Enable Motion Controls on (open the game's menu with - : Back / View on a controller, Backspace on the keyboard). "
+      "Left click shoots (ZR), right click locks on (ZL), middle click fires missiles (R).");
+    I("mouse_sensitivity", "Input", "Controls", "Mouse look sensitivity", LIVE_YES, "100", 25, 400, 5, "Percent: higher turns the camera with less mouse movement.");
     C("button_icons", "Input", "Controls", "Button icons", LIVE_RESTART, "auto",
       {{"auto", "Automatic"}, {"switch", "Switch (original)"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}},
       "Automatic: from the controller connected when the game starts. Xbox controllers and the Steam Deck get Xbox icons, DualShock 4 PS4 icons, DualSense PS5 icons, Switch controllers the originals.");

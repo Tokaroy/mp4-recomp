@@ -15,6 +15,7 @@
 #include <GL/glx.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <ctype.h>
 
 static Display* dpy; static Window win; static Atom wm_delete, a_state, a_fs; static Cursor g_blank;
 static volatile int g_ww=1280, g_wh=720; static int g_fullscreen=0, g_want_fs=1;
@@ -23,8 +24,9 @@ static char g_script[1024]; static char g_title[256]; static volatile int g_shot
 static u64 keys_held;
 extern int g_opt_fps;
 
-/* [Input] mouse_buttons: the game mouse (free aim, buttons) is the Windows backend's only; nothing to re-parse here */
-void mouse_map_reset(void){}
+/* [Input] mouse_buttons: parsed again on the next poll (mouse_map below) */
+static int g_mb_bit[5]={-2,-2,-2,-2,-2};   /* -2 not parsed yet, -1 none */
+void mouse_map_reset(void){ g_mb_bit[0]=-2; }
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
@@ -118,6 +120,48 @@ static void cursor_sync(void){
   static int hidden=-1; int want= g_fullscreen && !ov_is_open();
   if(want==hidden) return;
   hidden=want; if(want) XDefineCursor(dpy,win,g_blank); else XUndefineCursor(dpy,win); XFlush(dpy); }
+
+/* ---- mouse look ([Input] mouse_aim, on by default). A click in the game window captures the mouse: the pointer is
+   grabbed and hidden, kept at the window's centre (warped back after each move, which XWayland also turns into a
+   locked pointer), and each move turns the controller (svc_hid.c hid_motion_add), so the game's motion aiming turns
+   the camera with the mouse. The buttons press the Switch buttons in mouse_buttons. Esc, F1 (the menu), switching to
+   another window or turning mouse_aim off lets the mouse go */
+static int g_mcap, g_mdx, g_mdy; static unsigned g_mbtn;   /* captured; movement since the last poll; buttons held: 1 left 2 right 4 middle 8 back 16 forward */
+static void mouse_map(void){
+  if(g_mb_bit[0]!=-2) return;
+  extern char g_opt_mouse_buttons[]; static const struct { const char* n; int bit; } N[]={{"a",0},{"b",1},{"x",2},{"y",3},
+    {"lstick",4},{"rstick",5},{"l",6},{"r",7},{"zl",8},{"zr",9},{"plus",10},{"minus",11}};
+  const char* p=g_opt_mouse_buttons;
+  for(int i=0;i<5;i++){ char t[16]; int k=0; while(*p==' ') p++; while(*p && *p!=',' && k<15) t[k++]=(char)tolower((unsigned char)*p++); t[k]=0; if(*p==',') p++;
+    g_mb_bit[i]=-1; for(size_t j=0;j<sizeof N/sizeof *N;j++) if(!strcmp(t,N[j].n)) g_mb_bit[i]=N[j].bit; } }
+static void mouse_center(int* cx, int* cy){ *cx=g_ww/2; *cy=g_wh/2; }
+static void mouse_capture(int on){
+  if(on==g_mcap) return;
+  if(on){ int r=XGrabPointer(dpy,win,True,ButtonPressMask|ButtonReleaseMask|PointerMotionMask,GrabModeAsync,GrabModeAsync,win,g_blank,CurrentTime);
+    if(r!=GrabSuccess){ static int nf; if(nf++<5) LOG("input: the mouse could not be captured (X grab result %d: %s); click again\n",r,
+        r==AlreadyGrabbed? "another program holds the pointer" : r==GrabNotViewable? "the window is not shown" : r==GrabFrozen? "frozen" : "invalid time"); return; }
+    int cx, cy; mouse_center(&cx,&cy); XWarpPointer(dpy,None,win,0,0,0,0,cx,cy); g_mdx=g_mdy=0;
+    static int said; if(!said){ said=1; LOG("input: mouse captured for mouse look (Esc lets it go)\n"); } }
+  else { XUngrabPointer(dpy,CurrentTime); g_mbtn=0; }
+  g_mcap=on; XFlush(dpy); }
+static int mouse_bit(unsigned bt){ return bt==1? 1 : bt==3? 2 : bt==2? 4 : bt==8? 8 : bt==9? 16 : 0; }
+/* test only: SWR_TEST_MOUSE="FRAME:DX,DY,BUTTONS;..." adds that movement at that guest frame and holds those buttons
+   (hex, 1 left 2 right 4 middle) from there to the next entry, as on Windows */
+static void mouse_test(int* dx, int* dy, unsigned* btn){
+  static const char* s; static int init; static unsigned held; if(!init){ init=1; s=getenv("SWR_TEST_MOUSE"); }
+  if(!s) return; extern int g_frames;
+  while(*s){ char* e; long f=strtol(s,&e,10); if(e==s || *e!=':' || g_frames<f) break;
+    long x=strtol(e+1,&e,10); if(*e==',') e++; long y=strtol(e,&e,10); if(*e==',') e++; long b=strtol(e,&e,16);
+    *dx+=(int)x; *dy+=(int)y; held=(unsigned)b; s= *e==';'? e+1 : e; }
+  *btn|=held; }
+static void mouse_apply(u64* b, i32* rx, i32* ry){
+  extern int g_opt_mouse_aim, g_opt_mouse_sens;
+  int dx=g_mdx, dy=g_mdy; unsigned btn= g_mcap? g_mbtn : 0; g_mdx=g_mdy=0;
+  mouse_test(&dx,&dy,&btn);
+  if(!g_opt_mouse_aim){ if(g_mcap) mouse_capture(0); return; }
+  mouse_map();
+  for(int i=0;i<5;i++) if((btn>>i&1) && g_mb_bit[i]>=0) *b|=1ull<<g_mb_bit[i];
+  extern void mouse_to_input(int mode, int sens, int dx, int dy, i32* rx, i32* ry); mouse_to_input(g_opt_mouse_aim,g_opt_mouse_sens,dx,dy,rx,ry); }
 
 static void set_title(const char* t){ XStoreName(dpy,win,t); XFlush(dpy); }
 /* fast forward on/off in the title, as backend_win32.c does it (main.c ff_*) */
@@ -272,7 +316,7 @@ static void key_down(XKeyEvent* e){
     return; }
   if(k==XK_Return && (e->state&Mod1Mask)){ if(once) set_fullscreen(!g_fullscreen); return; }
   switch(k){
-    case XK_Escape: g_quit=1; return;
+    case XK_Escape: if(g_mcap){ if(once) mouse_capture(0); return; } g_quit=1; return;   /* a captured mouse goes first */
     case XK_F11: if(once) set_fullscreen(!g_fullscreen); return;
     case XK_F3: if(once) g_shot_req=1; return;
     case XK_F7: if(once) LOG("F7 video recording is only available on Windows\n"); return;
@@ -327,10 +371,17 @@ void video_poll(void){
   while(XPending(dpy)){ XEvent e; XNextEvent(dpy,&e);
     if(e.type==KeyPress) key_down(&e.xkey);
     else if(e.type==KeyRelease){ KeySym k=XLookupKeysym(&e.xkey,0); key_once(k,0); keys_held&=~keymap(k); if(ov_is_open()) ov_input_key(ovk_from_keysym(k),0); }
-    else if(e.type==MotionNotify){ ov_input_mouse((float)e.xmotion.x,(float)e.xmotion.y); }
-    else if(e.type==ButtonPress || e.type==ButtonRelease){ unsigned bt=e.xbutton.button; ov_input_mouse((float)e.xbutton.x,(float)e.xbutton.y);
-      if(bt==1 || bt==3) ov_input_button(bt==1? 0 : 1, e.type==ButtonPress); else if(e.type==ButtonPress && (bt==4 || bt==5)) ov_input_wheel(bt==4? 1.0f : -1.0f); }
-    else if(e.type==FocusOut) keys_held=0;
+    else if(e.type==MotionNotify){
+      if(g_mcap){ int cx, cy; mouse_center(&cx,&cy); int dx=e.xmotion.x-cx, dy=e.xmotion.y-cy;   /* the warp back arrives as a move to the centre: 0 */
+        if(dx || dy){ g_mdx+=dx; g_mdy+=dy; XWarpPointer(dpy,None,win,0,0,0,0,cx,cy); } }
+      else ov_input_mouse((float)e.xmotion.x,(float)e.xmotion.y); }
+    else if(e.type==ButtonPress || e.type==ButtonRelease){ unsigned bt=e.xbutton.button;
+      extern int g_opt_mouse_aim;
+      if(g_mcap){ int m=mouse_bit(bt); if(e.type==ButtonPress) g_mbtn|=(unsigned)m; else g_mbtn&=~(unsigned)m; }
+      else if(bt==1 && g_opt_mouse_aim && !ov_is_open()) mouse_capture(1);   /* the click that captures it presses nothing (tried again on its release if the press could not grab) */
+      else { ov_input_mouse((float)e.xbutton.x,(float)e.xbutton.y);
+        if(bt==1 || bt==3) ov_input_button(bt==1? 0 : 1, e.type==ButtonPress); else if(e.type==ButtonPress && (bt==4 || bt==5)) ov_input_wheel(bt==4? 1.0f : -1.0f); } }
+    else if(e.type==FocusOut){ keys_held=0; mouse_capture(0); }
     else if(e.type==ConfigureNotify){ g_ww=e.xconfigure.width>0? e.xconfigure.width : 1; g_wh=e.xconfigure.height>0? e.xconfigure.height : 1; }
     else if(e.type==ClientMessage && (Atom)e.xclient.data.l[0]==wm_delete){ LOG("window: closed by the user\n"); g_quit=1; } }
   u64 k=keys_held, b=0;
@@ -355,6 +406,7 @@ void video_poll(void){
       static int nfl; if(++nfl%64==0) fflush(rf); } }
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; }   /* the menu has the controller (and the game neutral input) */
+  if(ov_is_open()){ if(g_mcap) mouse_capture(0); g_mdx=g_mdy=0; } else mouse_apply(&b,&rx,&ry);   /* the menu uses the mouse itself while open */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
 

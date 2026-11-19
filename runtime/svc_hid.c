@@ -4,6 +4,7 @@
 /* hid. Games read the shared memory directly, so we fill it in the real layout (17 entry LIFOs). */
 #include "rt.h"
 #include "hid_layout.h"
+#include <math.h>
 
 KShmem* kshmem_new(u64 size, const char* name);
 u8* kshmem_ptr(KShmem* s);
@@ -38,6 +39,45 @@ static void npad_setup(u8* base, int idx, u32 style, u32 devtype){
 }
 
 u64 g_pad_buttons_now;   /* cheats.c: keypress codes */
+/* Mouse look through the game's motion aiming: the backends turn mouse movement into rotation of the controller
+   (hid_motion_add, revolutions about its up and side axes), and the six-axis state reports it as a real gyro would:
+   angular velocity over the update's time, the accumulated angle and orientation, gravity seen in the turned frame.
+   Metroid Prime 4 turns the camera by the controller's rotation (its motion controls), so the camera follows the mouse
+   1:1 instead of a stick's turning speed. Main thread only (video_poll, then hid_update) */
+static float g_mot_add[2], g_mot_ang[2]; static u64 g_mot_t; static int g_mot_moving;
+void hid_motion_add(float yaw_rev, float pitch_rev){ g_mot_add[0]+=yaw_rev; g_mot_add[1]+=pitch_rev; }
+/* a poll's mouse movement (counts, screen y down) as the game's input, for every backend. [Input] mouse_aim:
+   1 camera stick (the default: works with no game setting). A stick sets a turning speed, so the mouse's speed (smoothed
+     over a few polls) becomes the stick's tilt, starting past the game's dead zone: less exact than motion
+   2 motion: the controller turns. With the game's Settings > Camera > Enable Motion Controls on, the camera turns with it
+     in proportion, 1:1 with the mouse; the Pointer scheme moves its crosshair instead and turns the camera only near the
+     screen's edge (as the Wii games did). Without that game setting nothing turns. At 100% 2500 counts are one turn of
+     the controller: with the game's default motion sensitivity (42) about 0.15 degrees of camera a count (measured
+     0.8 px a count at 5000 a turn, linear from 50 to 150 counts) */
+void mouse_to_input(int mode, int sens, int dx, int dy, i32* rx, i32* ry){
+  static float vx, vy; static int said;
+  if(mode==2){ if(dx || dy){ float s=(float)sens/100.0f/2500.0f; hid_motion_add(-(float)dx*s,-(float)dy*s); if(!said){ said=1; LOG("input: mouse look in use (motion: the game's Camera > Enable Motion Controls)\n"); } } return; }
+  if(mode!=1) return;
+  vx=vx*0.55f+(float)dx*0.45f; vy=vy*0.55f+(float)dy*0.45f;   /* counts per poll, smoothed */
+  float k=(float)sens/100.0f/24.0f;   /* 24 counts a poll (1440 a second) = full tilt */
+  float tx=vx*k, ty=-vy*k, m=sqrtf(tx*tx+ty*ty);
+  if(m<0.01f){ vx=dx? vx : 0; vy=dy? vy : 0; return; }
+  float t= m>1? 1 : m, out=0.18f+0.82f*t;   /* past the dead zone (about 15%) */
+  if(!*rx && !*ry){ *rx=(i32)(tx/m*out*32767.0f); *ry=(i32)(ty/m*out*32767.0f); }   /* a real stick in use wins */
+  if(!said){ said=1; LOG("input: mouse look in use (camera stick)\n"); } }
+static void motion_state(u8* six, u64 now){
+  float dt= g_mot_t && now>g_mot_t? (float)((now-g_mot_t)/1e9) : 1.0f/60; if(dt<0.001f) dt=0.001f; if(dt>0.1f) dt=0.1f;
+  u64 dtn=(u64)(dt*1e9f); g_mot_t=now; memcpy(six,&dtn,8);
+  float wy=g_mot_add[0]/dt, wp=g_mot_add[1]/dt;   /* revolutions per second, the SDK's unit (1.0 = 360 degrees a second) */
+  g_mot_ang[0]+=g_mot_add[0]; g_mot_ang[1]+=g_mot_add[1]; g_mot_moving= g_mot_add[0]!=0 || g_mot_add[1]!=0; g_mot_add[0]=g_mot_add[1]=0;
+  g_mot_ang[0]-=floorf(g_mot_ang[0]); if(g_mot_ang[1]>0.24f) g_mot_ang[1]=0.24f; if(g_mot_ang[1]<-0.24f) g_mot_ang[1]=-0.24f;
+  /* the controller lying flat: x right, y ahead, z up. Turned by yaw about z, then pitch about its x */
+  float a=g_mot_ang[0]*6.2831853f, b=g_mot_ang[1]*6.2831853f, ca=cosf(a), sa=sinf(a), cb=cosf(b), sb=sinf(b);
+  float X[3]={ca,sa,0}, Y[3]={-sa*cb,ca*cb,sb}, Z[3]={sa*sb,-ca*sb,cb};
+  float w[3]={wp,0,wy}, ang[3]={g_mot_ang[1],0,g_mot_ang[0]};
+  float acc[3]={-X[2],-Y[2],-Z[2]};   /* gravity (0,0,-1) in the controller's axes */
+  memcpy(six+HO_HidSixAxisSensorState_acceleration,acc,12); memcpy(six+0x1C,w,12); memcpy(six+0x28,ang,12);
+  float dir[9]={X[0],X[1],X[2], Y[0],Y[1],Y[2], Z[0],Z[1],Z[2]}; memcpy(six+HO_HidSixAxisSensorState_direction,dir,36); }
 void hid_update(void){
   if(!g_hid_shm) return;
   u8* b=kshmem_ptr(g_hid_shm);
@@ -63,11 +103,9 @@ void hid_update(void){
   u8 z[0x28]; memset(z,0,sizeof z); memcpy(z,&g_samp,8);
   for(int i=1;i<10;i++){ if(i==8) continue; u8* e=b+HO_HidSharedMemory_npad+i*HS_HidNpadSharedMemoryEntry;
     lifo_push(e+HO_HidNpadInternalState_full_key_lifo,HS_HidNpadCommonStateAtomicStorage,z,0x28,g_samp); }
-  /* six-axis: at rest, gravity down */
+  /* six-axis: gravity down, turned by the mouse (motion_state) */
   u8 six[HS_HidSixAxisSensorState]; memset(six,0,sizeof six);
-  memcpy(six,&g_samp,8); memcpy(six+8,&g_samp,8);
-  float acc[3]={0,0,-1}; memcpy(six+HO_HidSixAxisSensorState_acceleration,acc,12);
-  float dir[9]={1,0,0, 0,1,0, 0,0,1}; memcpy(six+HO_HidSixAxisSensorState_direction,dir,36);
+  memcpy(six+8,&g_samp,8); motion_state(six,plat_ns());
   u32 sattr=1; memcpy(six+HO_HidSixAxisSensorState_attributes,&sattr,4);
   lifo_push(e0+HO_HidNpadInternalState_full_key_six_axis_sensor_lifo,HS_HidSixAxisSensorStateAtomicStorage,six,sizeof six,g_samp);
   lifo_push(e0+HO_HidNpadInternalState_joy_dual_left_six_axis_sensor_lifo,HS_HidSixAxisSensorStateAtomicStorage,six,sizeof six,g_samp);
@@ -120,7 +158,8 @@ static int hid_disp(SvcObj* o, IpcCtx* c){
     case 40: out_copy_h(c,h_new(&kevent_new("xpad id",0)->o)); return 0;         /* AcquireXpadIdEventHandle */
     case 55: case 59: out64(c,0); return 0;                                        /* GetXpadIds: none */
     case 58: case 62: out_copy_h(c,h_new(&kshmem_new(0x1000,"hid lifo")->o)); return 0;
-    case 68: case 82: out8(c,1); return 0;                                         /* IsSixAxisSensorFusionEnabled / AtRest */
+    case 68: out8(c,1); return 0;                                                  /* IsSixAxisSensorFusionEnabled */
+    case 82: out8(c,!g_mot_moving); return 0;                                      /* IsSixAxisSensorAtRest: not while the mouse turns it */
     case 69: case 70: case 71: case 72: case 73: case 74: case 75: case 76: case 77: case 78: case 79: case 80: case 81: case 83: case 84: case 85: case 86: case 87: case 88: case 89:
       if(c->cmd==71||c->cmd==73||c->cmd==79||c->cmd==84||c->cmd==86||c->cmd==88){ out32(c,0); out32(c,0); } return 0;
     case 100: { g_style_supported=in32(c,0);                                         /* SetSupportedNpadStyleSet */

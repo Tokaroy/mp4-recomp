@@ -21,9 +21,9 @@ static HANDLE g_ready;
 static volatile int g_fe_mode;   /* the front end owns the window (its messages go to fe_wndproc) */
 static HANDLE g_fe_done, g_video_go; static int g_fe_result, g_win_started;
 static HWND g_fe_hwnd;
-/* mouse free aim: raw movement since the last poll (WM_INPUT, any thread adds, the input thread takes), and the buttons
-   held (1 left, 2 right, 4 middle, 8 back, 16 forward) */
-static volatile LONG g_mdx, g_mdy, g_mbtn;   /* the front end's window, retired at Play (its messages go to DefWindowProc) */
+/* mouse look: raw movement since the last poll (WM_INPUT, any thread adds, the input thread takes), and the buttons
+   held (1 left, 2 right, 4 middle, 8 back, 16 forward); g_mcap: a click captured the mouse (the cursor kept in the window) */
+static volatile LONG g_mdx, g_mdy, g_mbtn, g_mcap;   /* the front end's window, retired at Play (its messages go to DefWindowProc) */
 #define PAD_HOME (1ull<<30)   /* Home / Guide / PS: physical only, opens the in-game menu, never reaches the game */
 extern int g_opt_fps;
 
@@ -259,7 +259,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
     if(w==VK_F4){ if(l & (1L<<30)) return 0; g_opt_fps= g_opt_fps==0? 1 : 0; char t[64]; snprintf(t,sizeof t,"FPS limit: %s",g_opt_fps==0? "unlimited" : "60"); SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d\n",g_opt_fps); { extern void ini_set(const char*, const char*); char v[8]; snprintf(v,sizeof v,"%d",g_opt_fps); ini_set("fps_limit",v); } return 0; }
     keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
   case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
-  case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); ClipCursor(NULL); ReleaseCapture(); return 0;
+  case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); InterlockedExchange(&g_mcap,0); ClipCursor(NULL); ReleaseCapture(); return 0;
   case WM_APP+8: { char t[300]; if(w) snprintf(t,sizeof t,"%s  |  RECORDING (F7 to stop)",g_title); else snprintf(t,sizeof t,"%s  |  Video saved in the recordings folder",g_title); SetWindowTextA(h,t); return 0; }
   case WM_APP+10: { char t[400]; char* s=(char*)l; if(s){ snprintf(t,sizeof t,"%s  |  %s",g_title,s); free(s); } else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }   /* backend_status_win */
   case WM_APP+9: { char t[160]; if(w) snprintf(t,sizeof t,"%s  |  FAST FORWARD x%d (Tab or L3+R3)",g_title,(int)l); else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }
@@ -274,13 +274,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
               : (HIWORD(w)==XBUTTON1? 8 : 16);
       int down= m==WM_LBUTTONDOWN||m==WM_RBUTTONDOWN||m==WM_MBUTTONDOWN||m==WM_XBUTTONDOWN;
       LONG now= down? (g_mbtn|bit) : (g_mbtn&~bit); InterlockedExchange(&g_mbtn,now);
-      extern int mouse_aim_button(void);
+      extern int g_opt_mouse_aim;
       if(now && GetCapture()!=h) SetCapture(h); else if(!now) ReleaseCapture();   /* releases still arrive outside the window */
-      if(down && (bit&mouse_aim_button())){ RECT c; GetClientRect(h,&c); MapWindowPoints(h,NULL,(POINT*)&c,2); ClipCursor(&c); }   /* aiming: the cursor stays in */
-      else if(!down && (bit&mouse_aim_button())) ClipCursor(NULL);
+      if(down && g_opt_mouse_aim && !ov_is_open() && !g_mcap){ RECT c; GetClientRect(h,&c); MapWindowPoints(h,NULL,(POINT*)&c,2); ClipCursor(&c);   /* mouse look: the cursor stays in */
+        InterlockedExchange(&g_mdx,0); InterlockedExchange(&g_mdy,0); InterlockedExchange(&g_mcap,1); InterlockedExchange(&g_mbtn,0); }   /* the capturing click presses nothing */
       return (m==WM_XBUTTONDOWN||m==WM_XBUTTONUP)? TRUE : 0; }
   case WM_SETCURSOR: if(LOWORD(l)==HTCLIENT && ov_is_open()){ SetCursor(LoadCursor(NULL,IDC_ARROW)); return TRUE; }
-    { extern int g_opt_mouse_aim; if(g_opt_mouse_aim && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; } }   /* free aim: no cursor over the game */
+    if(g_mcap && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; }   /* mouse look: no cursor over the game */
     if(g_fullscreen && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; } break;
   }
   return DefWindowProcA(h,m,w,l);
@@ -465,10 +465,8 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   }
 }
 
-/* Mouse free aim. Free aim follows the left stick while L is held: while the mouse button set to l
-   (right by default) is held, the mouse moves a virtual stick, which turns the aim. It starts centred (the arm points
-   ahead), the mouse pushes it, and it stays where it was pushed (a stick needs no holding): ~150 counts at 100%
-   sensitivity swing it from centre to the edge. The other mouse buttons press their Switch buttons */
+/* Mouse look (svc_hid.c mouse_to_input: the game's motion aiming, or the camera stick), once a click has captured the
+   mouse. The mouse buttons press their Switch buttons (mouse_buttons) */
 static int g_mb_bit[5]={-2,-2,-2,-2,-2};   /* -2 not parsed yet, -1 none */
 void mouse_map_reset(void){ g_mb_bit[0]=-2; }
 static void mouse_map(void){
@@ -478,7 +476,6 @@ static void mouse_map(void){
   const char* p=g_opt_mouse_buttons;
   for(int i=0;i<5;i++){ char t[16]; int k=0; while(*p==' ') p++; while(*p && *p!=',' && k<15) t[k++]=(char)tolower((unsigned char)*p++); t[k]=0; if(*p==',') p++;
     g_mb_bit[i]=-1; for(size_t j=0;j<sizeof N/sizeof *N;j++) if(!strcmp(t,N[j].n)) g_mb_bit[i]=N[j].bit; } }
-int mouse_aim_button(void){ mouse_map(); int m=0; for(int i=0;i<5;i++) if(g_mb_bit[i]==6) m|=1<<i; return m; }   /* the mouse buttons set to L */
 /* test only: SWR_TEST_MOUSE="FRAME:DX,DY,BUTTONS;..." adds that movement at that guest frame and holds those buttons
    (hex, 1 left 2 right 4 middle) from there to the next entry */
 static void mouse_test(LONG* dx, LONG* dy, LONG* btn){
@@ -488,23 +485,15 @@ static void mouse_test(LONG* dx, LONG* dy, LONG* btn){
     long x=strtol(e+1,&e,10); if(*e==',') e++; long y=strtol(e,&e,10); if(*e==',') e++; long b=strtol(e,&e,16);
     *dx+=x; *dy+=y; held=(int)b; s= *e==';'? e+1 : e; }
   *btn|=held; }
-static void mouse_apply(u64* b, i32* lx, i32* ly){
+static void mouse_apply(u64* b, i32* rx, i32* ry){
   extern int g_opt_mouse_aim, g_opt_mouse_sens;
   LONG dx=InterlockedExchange(&g_mdx,0), dy=InterlockedExchange(&g_mdy,0), btn=g_mbtn;
-  static float vx, vy; static int was;
+  if(!g_mcap){ dx=dy=0; btn=0; }
   mouse_test(&dx,&dy,&btn);
-  if(!g_opt_mouse_aim){ was=0; return; }
+  if(!g_opt_mouse_aim){ if(g_mcap){ InterlockedExchange(&g_mcap,0); ClipCursor(NULL); } return; }
   mouse_map();
   for(int i=0;i<5;i++) if((btn>>i&1) && g_mb_bit[i]>=0) *b|=1ull<<g_mb_bit[i];
-  int aiming=(btn & mouse_aim_button())!=0;
-  if(aiming){
-    if(!was) vx=vy=0;
-    float s=(float)g_opt_mouse_sens/100.0f/150.0f;
-    vx+=(float)dx*s; vy-=(float)dy*s;   /* screen y is down, the stick's up */
-    float m=sqrtf(vx*vx+vy*vy); if(m>1.0f){ vx/=m; vy/=m; m=1.0f; }
-    if(m>=0.25f){ *lx=(i32)(vx/m*32767.0f); *ly=(i32)(vy/m*32767.0f); } else *lx=*ly=0;   /* aimed: full tilt that way */
-    { static int said; if(!said){ said=1; LOG("input: mouse free aim in use\n"); } } }
-  was=aiming; }
+  extern void mouse_to_input(int mode, int sens, int dx, int dy, i32* rx, i32* ry); mouse_to_input(g_opt_mouse_aim,g_opt_mouse_sens,(int)dx,(int)dy,rx,ry); }
 
 void video_poll(void){
   u64 k=keys_held|keys_tapped, b=0;keys_tapped=0;
@@ -537,7 +526,8 @@ void video_poll(void){
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* beyond_ui/ov.cpp: 1 = the menu has the controller */
     if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; } }
-  if(!ov_is_open()) mouse_apply(&b,&lx,&ly);   /* the menu uses the mouse itself while open */
+  if(!ov_is_open()) mouse_apply(&b,&rx,&ry);   /* the menu uses the mouse itself while open */
+  else if(g_mcap){ InterlockedExchange(&g_mcap,0); ClipCursor(NULL); }
   { /* rumble (svc_hid.c hid_rumble_get) to the pads input comes from: on a change, else refreshed every 100 ms
        (SDL's rumble runs for the duration given, so it stops by itself when the game stops sending) */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
