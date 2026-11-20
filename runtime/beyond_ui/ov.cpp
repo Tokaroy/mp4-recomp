@@ -403,9 +403,15 @@ static bool menu_frame(int w, int h) {
         if (open && !g_ready) {}   // first open below
         if (open && g_vals.empty()) g_vals = g_q.vals;
     }
-    static bool was_open, need_theme;
+    static bool was_open, need_theme; static double last;   // last: the previous menu frame's time
     if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; capture_cancel(); g_bind_note.clear(); } return false; }
-    if (!was_open) { was_open = true; need_theme = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; } }
+    if (!was_open) {
+        was_open = true; need_theme = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; }
+        // the key that closed the menu last time (Esc, B) was let go while it was closed, so ImGui never saw it released: it
+        // would still be held now and, with the closed time counted as one frame, repeat at once and close the menu again
+        if (ImGui::GetCurrentContext()) { ImGui::GetIO().ClearInputKeys(); ImGui::GetIO().ClearInputMouse(); }
+        last = 0;
+    }
     if (!g_ready) {
         IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr; io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -420,7 +426,7 @@ static bool menu_frame(int w, int h) {
     }
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
-    static double last; double now = now_s();
+    double now = now_s();
     io.DeltaTime = last > 0 ? std::max(1e-4f, (float)(now - last)) : 1.0f / 60; last = now;
     for (auto& e : ev) {
         switch (e.type) {
