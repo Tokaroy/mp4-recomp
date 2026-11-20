@@ -63,6 +63,27 @@ Everything that changed is listed below.
 
 ## Install and play
 
+### Windows
+
+1. Download `MetroidPrime4Recomp-PC-vYYYY.MM.DD.zip` from [releases](../../releases/latest) and extract it anywhere with
+   room, for example `D:\Games\`. You get a `Metroid Prime 4 Beyond` folder.
+2. Run **`Metroid Prime 4 Beyond.exe`** in it.
+3. **First run:** the setup screen asks for your game (its `.xci` / `.nsp` file, or an extracted folder) and the update
+   (its `.nsp`, or an extracted folder). Press **Start Setup**: it verifies the files, copies them into the game folder
+   and compiles the game with the bundled GCC (a few minutes on a fast CPU).
+4. Press **Play**. The first launch builds shaders in the background; later launches load them from the cache.
+
+Everything stays in the game folder, next to the EXE:
+
+| Path | What |
+|---|---|
+| `Metroid Prime 4 Beyond.ini` | settings, rewritten with every option explained on the first start |
+| `Metroid Prime 4 Beyond_data\` | the installed game data, saves, cheats and mods |
+| `shader_cache\` | compiled shaders |
+| `Metroid Prime 4 Beyond.log`, `setup.log` | logs for bug reports |
+
+### Linux (AppImage)
+
 1. Download `Metroid_Prime_4_Recomp-x86_64.AppImage` from the release and make it executable:
 
    ```bash
@@ -107,7 +128,8 @@ you started, checked against its SHA-256 and put in its place, and the launcher 
 kept as `<name>.previous` (UNDO puts it back). If the update changed the recompiler, the Play screen asks to rebuild
 the game code (a few minutes). Downloads use the system's libcurl (the `curl` package). With `skip_launcher=1` the
 check happens when you open the Play screen (`--launcher`). Builds before 2026-11-04 have no updater: download that
-release once by hand.
+release once by hand. The Windows build checks the same way: it downloads `update-<version>.zip` and `update.txt` from this
+repository's latest release, checks each file's size and SHA-256 and puts the new files in place.
 
 ## Saves
 
@@ -125,23 +147,41 @@ downloaded to a PC.
 ## Controls and the in-game menu
 
 - Controllers work through SDL2 (tested with an Xbox Series X controller; **ZL is the left trigger**).
-- Keyboard: WASD to move, **1** = ZL, **3** = ZR.
-- **Esc** opens the game's own menu (map, inventory, Settings), like the − button; it no longer quits (close the window,
-  or use QUIT GAME in the F1 menu).
-- **Mouse look:** click the game window to capture the mouse (**Esc** lets it go). By default the
-  mouse pushes the camera stick, which works right away. For 1:1 aiming, set Mouse look to **Motion** (F1 menu >
-  Controls, or the launcher's Controls page) and turn on the game's own **Settings > Camera > Enable Motion Controls**
-  (open the game's menu with Esc, or − : Back / View on a controller): the mouse is then reported as
-  the controller's motion sensor, and the game's Motion Control Sensitivity sliders set the speed too. Buttons: left =
-  ZR (shoot), right = ZL (lock on), middle = R (missiles), back = L; change them with `mouse_buttons` in the settings
-  file.
+- **Mouse and keyboard** work together with a controller, on Linux and Windows. The defaults follow PrimeHack:
+
+  | Action | Key or button |
+  |---|---|
+  | Move (left stick) | **W A S D**, or **arrow keys** |
+  | Camera (right stick) | **the mouse**, or **I J K L** |
+  | Fire, charge, interact (A) | **left click**, or **Enter** |
+  | Lock on, grapple, scan (ZL) | **right click**, or **Shift** |
+  | Secondary weapon (R) | **middle click**, or **F** |
+  | Jump, dodge (B) | **Space** |
+  | Morph ball (Y) | **Ctrl** |
+  | Visors, spring ball (X) | **E**, or **Alt** |
+  | L | **Q** |
+  | D-pad right, left, up, down | **1**, **2**, **3**, **4** |
+  | + | **R** |
+  | - (pause: the game's own menu) | **Esc**, **Tab**, or **`** |
+
+  While you play, the cursor is hidden and kept in the window. Opening the in-game menu (F1) or switching to another
+  window frees it. The menu's **CONTROLS** page rebinds every button: select one, then press a key for it (Shift,
+  Ctrl or Alt held with it make a chord such as `Shift+1`; pressing a key the button already has takes it off). The
+  same page has the mouse buttons and the mouse settings: mouse look on or off, sensitivity, invert up and down, and
+  the starting push (how far the stick is pushed by the smallest mouse movement, past the game's dead zone).
+  In the `.ini`, `[Input]` has a `key_<button>=` line per button (`key_a=Enter`, `key_dpad_right=1, Shift+F`, `-` for
+  none), and `mouse_buttons` sets what the left, right, middle, back and forward buttons press (default
+  `a,zl,r,-,-`, `-` for nothing). On Windows with `fast_forward=1`, **Tab** toggles fast forward instead.
+  **Esc** doesn't quit: close the window, or use QUIT GAME in the F1 menu.
 - **F1** or the Home / Guide button opens the in-game menu (settings, cheats, FOV, upscaling).
 - **F3** saves a screenshot to `captures/`, **F4** toggles the 60 fps limit, **F5** writes a frame trace for bug
   reports, **F11** toggles fullscreen.
 
 ## Cheat support
 
-Cheats are off by default and need the **Cheat codes** switch left on. Open them on the launcher's **Gameplay** page (scroll down) or on the **Cheats** page of the in-game menu (F1 or the Home / Guide button). Changes apply while the game is running.
+Cheats are off by default and need the **Cheat codes** switch left on. Open them on the launcher's **Gameplay** page
+(scroll down) or on the **Cheats** page of the in-game menu (F1 or the Home / Guide button). Changes apply while the
+game is running.
 
 **Built-in cheats** for game build `8275FBE1EC5191C2`:
 
@@ -155,7 +195,11 @@ The **Green Energy 10x** option is on the same page.
 
 Some of these are still being tested. Walk through walls can leave you stuck, so keep a separate save before using it.
 
-**Your own cheat files** use the Atmosphere (dmnt) format, so existing files work as they are. Put them at `~/.local/share/MetroidPrime4Recomp/Metroid Prime 4 Beyond_data/cheats/8275FBE1EC5191C2.txt`, then turn each cheat on in the in-game menu. Cheats that change game data work. Cheats that patch ARM instructions have no effect, because the game's code is recompiled.
+**Your own cheat files** use the Atmosphere (dmnt) format, so existing files work as they are. On Windows put them at
+`Metroid Prime 4 Beyond_data\cheats\8275FBE1EC5191C2.txt` in the game folder; on Linux at
+`~/.local/share/MetroidPrime4Recomp/Metroid Prime 4 Beyond_data/cheats/8275FBE1EC5191C2.txt`. Then turn each cheat on
+in the in-game menu. Cheats that change game data work. Cheats that patch ARM instructions have no effect, because the
+game's code is recompiled.
 
 ## Performance on the test machine
 
@@ -326,6 +370,20 @@ from the same save), traced to a root cause and checked again in the game.
   machine's, which had made it need AVX-512 and glibc 2.43 ("CPU ISA level is lower than required" on a Steam Deck).
 - Cheats in Atmosphere / dmnt format, toggled per cheat in the in-game menu.
 - AMD FidelityFX FSR 1 upscaling with a sharpness slider.
+- **AMD FSR 3.1 frame generation** (Windows, `renderer=vulkan_native`, `[Graphics] fsr_frame_generation=1`): one
+  generated frame between each pair the game renders, on any GPU with Vulkan 1.3. AMD's two signed DLLs are not part
+  of the release: the launcher's Graphics page has a **Download AMD FSR frame generation** button that fetches them
+  from AMD's FidelityFX SDK on GitHub (v2.4.0, size and SHA-256 checked). Limits for now: the HUD is generated along
+  with the scene (no HUD-less image yet), it is off with HDR, and it pauses while the in-game menu is open and on
+  screens without a 3D scene.
+- **NVIDIA DLSS download**: the launcher's Graphics page has a **Download NVIDIA DLSS** button that fetches
+  `nvngx_dlss.dll` from NVIDIA's DLSS repository on GitHub (v310.9.16, size and SHA-256 checked) for DLAA
+  (`[Graphics] dlss=1`, RTX cards).
+- Launcher themes (Display page, LAUNCHER LOOK): Beyond, Amber visor, High contrast, or your own `theme.ini` next to
+  the game (`accent=#RRGGBB` lines; the page shows the text contrast it gives). The in-game menu follows the theme.
+  **Reduce motion** stops the background rings and the progress-bar stripes.
+- The setup screen shows the free space on the game folder's drive beside the 30 GB it needs, and gives the Windows
+  key folder (`%USERPROFILE%\.switch`) on Windows.
 
 ### Diagnostics and testing tools
 
@@ -358,7 +416,9 @@ from the same save), traced to a root cause and checked again in the game.
 - **The FOV slider** has no effect yet (the camera address for this build hasn't been found).
 - **Not modelled yet:** a filter effect on two audio submixes and an aux effect, so a few sounds may be clearer than
   intended.
-- **Windows** is inherited from the upstream project and untested.
+- **Windows** builds from source (`build.bat`, see [Building from source](#building-from-source)) and its setup and
+  Play screens start, but the game itself has not been played on Windows in this fork yet, and there is no Windows
+  release download yet.
 - The rainbow screen after opening a door is believed fixed (see above) but wasn't reproduced directly.
 
 ## Troubleshooting
@@ -407,12 +467,70 @@ UTC build time, its SHA-256 and the ID of the recompiler it brings); `bash linux
 to the latest release (or TAG), which is what the launcher's updater reads. To run from the source tree without
 the AppImage instead: `bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]`, then `bash linux/run.sh`.
 
+### Windows
+
+You need a 64-bit GCC (MinGW-w64), Python 3 and glslang:
+
+- **GCC:** [MSYS2](https://www.msys2.org) with its UCRT64 compiler (`pacman -S mingw-w64-ucrt-x86_64-gcc`, then add
+  `C:\msys64\ucrt64\bin` to `PATH`), or [winlibs](https://winlibs.com) GCC 14.2.0 (UCRT, POSIX threads, x64) unpacked
+  into `gcc\` in the repository. Releases are built with the winlibs one.
+- **Python 3:** any Python 3 on `PATH` or the `py` launcher, or the Python 3.12 embeddable package in `python\`.
+- **glslang:** from the [Vulkan SDK](https://vulkan.lunarg.com) (found through `VULKAN_SDK`), on `PATH`, or named with
+  `set GLSLANG=C:\path\to\glslang.exe`.
+
+All four can be fetched at their pinned versions instead (winlibs GCC 14.2.0, Python 3.12, glslang 16.6.0, SDL2), each
+checked by SHA-256, into the folders `build.bat` looks in:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\get_tools.ps1
+$env:GLSLANG = "$PWD\third_party\glslang\bin\glslang.exe"
+```
+
+Then:
+
+```bat
+build.bat
+```
+
+This builds `bin\runtime_win64_win32.exe`. To set the game up from the source tree, copy it next to where the game
+should live as `Metroid Prime 4 Beyond.exe`, then start it with the recompiler pointed at the repository and a GCC for
+the game code:
+
+```bat
+set SWR_RECOMPILER=C:\path\to\mp4-recomp
+set CC=C:\msys64\ucrt64\bin\gcc.exe
+"Metroid Prime 4 Beyond.exe"
+```
+
+The setup screen then works as on Linux: choose your `.xci` / `.nsp` and the update `.nsp` (with `prod.keys` in
+`%USERPROFILE%\.switch` or where Ryujinx or yuzu keep it), or extracted folders. `SWR_PYTHON` names the Python to use
+when `python.exe` on `PATH` isn't the one you want.
+
+### Windows release
+
+`build.bat release X.Y.Z` builds the runtime and packs `release\X.Y.Z\`: the game folder, the zip players download,
+`update-X.Y.Z.zip` and `update.txt` for the Play screen's updater.
+
+The releases themselves are built by GitHub Actions: push a tag `vYYYY.MM.DD` (or run the workflow by hand and give it a
+version) and [.github/workflows/release.yml](.github/workflows/release.yml) fetches the pinned toolchain with
+`windows/get_tools.ps1`, runs `build.bat release` and publishes the three files as the release's assets. The tag and the
+version in the file names must match, because `update.txt` is what installed copies compare against.
+
+`build.bat release X.Y.Z` also packs a release folder in `release\`. It needs the pinned toolchain in `gcc\` and
+`python\` (both go into the release, so players need nothing installed) and `redist\zlib1.dll` and `redist\SDL2.dll`.
+
 ## Credits
 
 - **yozander2009-stack** and contributors: the recompiled runtime and launcher this port is built from
 - **MZ Labs**: SwitchRecomp (Apache-2.0); "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept
 - **ScarletNX**: the native Vulkan renderer (GPL-3.0)
-- **AMD**: FidelityFX Super Resolution 1 (MIT)
+- **AMD**: FidelityFX Super Resolution 1 (MIT); FidelityFX SDK 2.4.0 API headers (MIT) for FSR 3.1 frame
+  generation, whose DLLs are downloaded from AMD at the player's request
+- **NVIDIA**: DLSS, downloaded from NVIDIA at the player's request (`nvngx_dlss.dll` is not part of the release)
+- **melos444**: the [Green Energy 10x](https://gamebanana.com/mods/734159) mod that the Gameplay option of that name is based on
+- **Gamerjin**, **Luffysan** and **ZiT866**: the [cheat research on GBAtemp](https://gbatemp.net/threads/metroid-prime-4-beyond-010019a01e2f2000.677778/) that the built-in cheats are based on
+- **PlagueDrRiess**: the depth-target readback work in the renderer (read back only the part a DMA copy needs, and the
+  scan visor's reticle depth straight from the scaled buffer), ported here from the Windows fork of this project
 - **Dear ImGui** (MIT), libvpx and OpenH264 (BSD), SDL2 and zlib (zlib licence)
 - **melos444**: the [Green Energy 10x](https://gamebanana.com/mods/734159) mod that the Gameplay option of that name is based on
 - **Gamerjin**, **Luffysan** and **ZiT866**: the [cheat research on GBAtemp](https://gbatemp.net/threads/metroid-prime-4-beyond-010019a01e2f2000.677778/) that the built-in cheats are based on
