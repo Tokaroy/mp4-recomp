@@ -312,7 +312,10 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     h264 = os.path.isfile(os.path.join(oh, 'libdecoder.a')) and backend in ('win32', 'x11', 'headless')
     vp = os.path.join(RT, 'vp9', 'win' if target_win else 'lin')   # libvpx (VP9 .webm videos); optional
     vp9_static = os.path.isfile(os.path.join(vp, 'libvpx.a')) and backend in ('win32', 'x11', 'headless')
-    vp9_sys = (not vp9_static) and (not target_win) and backend in ('x11', 'headless') and os.system('pkg-config --exists vpx >/dev/null 2>&1') == 0
+    # the system's shared libvpx (distros without libvpx.a): local builds only. A release (the AppImage) must not depend on
+    # it: its soname differs between distros, and the AppImage's toolchain doesn't have it
+    vp9_sys = (not vp9_static) and (not target_win) and backend in ('x11', 'headless') and not os.environ.get('SWR_RELEASE') \
+        and os.system('pkg-config --exists vpx >/dev/null 2>&1') == 0
     vp9 = vp9_static or vp9_sys
     srcs += [os.path.join(RT, 'host1x.c'), os.path.join(RT, 'snxvk_glue.c')]
     # Metroid Prime 4 Beyond front end + in-game menu (Dear ImGui, runtime/beyond_ui); prebuilt by work-profiler/build_imgui.py
