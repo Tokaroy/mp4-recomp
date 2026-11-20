@@ -7,9 +7,8 @@
 KShmem* kshmem_new(u64 size, const char* name);
 u8* kshmem_ptr(KShmem* s);
 
-/* The language the game is given: one it has. A Switch never hands a game a language it doesn't list; it picks
-   the nearest it has. Portuguese (9, pt-BR 17) gets English (US): a game
-   without it loses its text and button glyphs, and Metroid Prime 4's language list is not known here */
+/* The language the game is given: [Display] language as it is. Portuguese (Brazil, 17) was tested in the game;
+   Portuguese (9) is passed on too, untested */
 static int game_lang(void){ extern int g_opt_lang; return g_opt_lang; }
 /* ================================================================ sm */
 static int sm_disp(SvcObj* o, IpcCtx* c){
