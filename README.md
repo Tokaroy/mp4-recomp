@@ -65,7 +65,7 @@ Everything that changed is listed below.
 
 ### Windows
 
-1. Download `MetroidPrime4Recomp-PC-vYYYY.MM.DD.zip` from [releases](../../releases/latest) and extract it anywhere with
+1. Download `MetroidPrime4Recomp-PC-vYYYY.MM.DD.HHMM.zip` from [releases](../../releases/latest) and extract it anywhere with
    room, for example `D:\Games\`. You get a `Metroid Prime 4 Beyond` folder.
 2. Run **`Metroid Prime 4 Beyond.exe`** in it.
 3. **First run:** the setup screen asks for your game (its `.xci` / `.nsp` file, or an extracted folder) and the update
@@ -419,9 +419,8 @@ from the same save), traced to a root cause and checked again in the game.
 - **The FOV slider** has no effect yet (the camera address for this build hasn't been found).
 - **Not modelled yet:** a filter effect on two audio submixes and an aux effect, so a few sounds may be clearer than
   intended.
-- **Windows** builds from source (`build.bat`, see [Building from source](#building-from-source)) and its setup and
-  Play screens start, but the game itself has not been played on Windows in this fork yet, and there is no Windows
-  release download yet.
+- **Windows:** the release's Windows build is made by GitHub Actions from this repository. The Windows work comes from
+  a contributor (pull request #13), who played it on Windows; this fork's maintainer tests on Linux only.
 - The rainbow screen after opening a door is believed fixed (see above) but wasn't reproduced directly.
 
 ## Troubleshooting
@@ -514,10 +513,11 @@ when `python.exe` on `PATH` isn't the one you want.
 `build.bat release X.Y.Z` builds the runtime and packs `release\X.Y.Z\`: the game folder, the zip players download,
 `update-X.Y.Z.zip` and `update.txt` for the Play screen's updater.
 
-The releases themselves are built by GitHub Actions: push a tag `vYYYY.MM.DD` (or run the workflow by hand and give it a
-version) and [.github/workflows/release.yml](.github/workflows/release.yml) fetches the pinned toolchain with
-`windows/get_tools.ps1`, runs `build.bat release` and publishes the three files as the release's assets. The tag and the
-version in the file names must match, because `update.txt` is what installed copies compare against.
+The Windows build in a release is made by GitHub Actions: **Actions > Windows release > Run workflow** (optionally with
+the release's tag; the latest release by default). [.github/workflows/release.yml](.github/workflows/release.yml) fetches
+the pinned toolchain with `windows/get_tools.ps1`, runs `build.bat release` with the build's UTC time as the version
+(`YYYY.MM.DD.HHMM`, as the AppImage's) and adds the three files to that release, next to the Linux AppImage. `update.txt`
+names the release's tag (`SWR_RELEASE_TAG`), so installed copies find `update-<version>.zip` there.
 
 `build.bat release X.Y.Z` also packs a release folder in `release\`. It needs the pinned toolchain in `gcc\` and
 `python\` (both go into the release, so players need nothing installed) and `redist\zlib1.dll` and `redist\SDL2.dll`.
