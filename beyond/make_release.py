@@ -127,7 +127,10 @@ def update_files(out, version):
     def sha(f):
         with open(f, 'rb') as h:
             return hashlib.sha256(h.read()).hexdigest()
-    lines = ['# Metroid Prime 4 Beyond PC update manifest (make_release.py)', 'version %s' % version, 'tag v%s' % version,
+    # the release the package is uploaded to: v<version> by default; SWR_RELEASE_TAG when the Windows build is added to an
+    # existing release (the Linux AppImage's, .github/workflows/release.yml)
+    tag = os.environ.get('SWR_RELEASE_TAG') or 'v%s' % version
+    lines = ['# Metroid Prime 4 Beyond PC update manifest (make_release.py)', 'version %s' % version, 'tag %s' % tag,
              'package %s %s %d' % (pkg, sha(pz), os.path.getsize(pz))]
     for r in own:
         f = os.path.join(dst, r.replace('/', os.sep))

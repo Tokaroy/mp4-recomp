@@ -1,18 +1,20 @@
-# Builds the Windows game folder and publishes it as a GitHub release: push a tag vYYYY.MM.DD (or run it by hand with a
-# version). The release gets the zip players download, plus update-<version>.zip and update.txt for the Play screen's
-# in-place updates (runtime/beyond_ui/fe_update.cpp reads them from releases/latest).
+# Builds the Windows game folder on GitHub's Windows machines and adds it to an existing release, next to the Linux
+# AppImage: Actions > Windows release > Run workflow, with the release's tag (default: the latest release).
+# The release gets the zip players download, plus update-<version>.zip and update.txt for the Play screen's in-place
+# updates (runtime/beyond_ui/fe_update.cpp reads update.txt from releases/latest, then the package from the tag it names).
+# The version is the build's UTC time (YYYY.MM.DD.HHMM), as the AppImage's, so every build is newer than the last.
 #
-# The workflow is PlagueDrRiess's (PlagueDrRiess/salsburysteaks), adapted to this fork's tree.
+# The workflow is PlagueDrRiess's (PlagueDrRiess/salsburysteaks), adapted by Zorkats to this tree (PR #13); it adds to
+# the existing release instead of making one per tag, which would hide the AppImage from the Linux updater.
 name: Windows release
 
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version, YYYY.MM.DD (the release is tagged vYYYY.MM.DD)'
-        required: true
+      tag:
+        description: 'Release to add the Windows build to (empty: the latest release)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -23,12 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version
+      - name: Version and release
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_IN: ${{ inputs.tag }}
         run: |
-          $v = if ('${{ github.event_name }}' -eq 'push') { '${{ github.ref_name }}'.TrimStart('v') } else { '${{ inputs.version }}' }
-          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "version '$v' is not X.Y.Z" }
+          $v = (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HHmm')
+          $t = $env:TAG_IN
+          if (-not $t) { $t = gh release view -R "${{ github.repository }}" --json tagName -q .tagName }
+          if ($t -notmatch '^v[0-9.]+$') { throw "release tag '$t' is not vX.Y.Z" }
+          gh release view $t -R "${{ github.repository }}" --json tagName | Out-Null
+          if ($LASTEXITCODE) { throw "release $t does not exist" }
           "VERSION=$v" >> $env:GITHUB_ENV
+          "SWR_RELEASE_TAG=$t" >> $env:GITHUB_ENV
+          Write-Host "Windows build $v for release $t"
 
       - name: Cache toolchain downloads
         uses: actions/cache@v4
@@ -46,14 +57,17 @@ jobs:
           set GLSLANG=%GITHUB_WORKSPACE%\third_party\glslang\bin\glslang.exe
           call build.bat release %VERSION%
 
-      # A release is published, never edited in place: what players already downloaded must keep working.
+      # update-<version>.zip is new each build, so a player's updater never sees a package change under it. The zip players
+      # download is replaced: older MetroidPrime4Recomp-PC-*.zip files are removed after the new one is up.
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $d = "release/$env:VERSION"
-          gh release create "v$env:VERSION" `
-            "$d/MetroidPrime4Recomp-PC-v$env:VERSION.zip" "$d/update-$env:VERSION.zip" "$d/update.txt" `
-            --target "${{ github.sha }}" --title "Metroid Prime 4 Recomp v$env:VERSION (Windows)" `
-            --notes "Windows build. Download MetroidPrime4Recomp-PC-v$env:VERSION.zip, extract it, and run ``Metroid Prime 4 Beyond.exe``. You need your own dumped copy of the game and its update; see the README. What changed: see CHANGELOG.md. Found a problem? Use the bug report form under Issues and attach Metroid Prime 4 Beyond.log from the game folder."
+          $d = "release/$env:VERSION"; $r = "${{ github.repository }}"; $t = $env:SWR_RELEASE_TAG
+          $zip = "MetroidPrime4Recomp-PC-v$env:VERSION.zip"
+          gh release upload $t "$d/$zip" "$d/update-$env:VERSION.zip" "$d/update.txt" -R $r --clobber
+          if ($LASTEXITCODE) { throw "upload failed" }
+          $old = gh release view $t -R $r --json assets -q '.assets[].name' | Where-Object { $_ -like 'MetroidPrime4Recomp-PC-v*.zip' -and $_ -ne $zip }
+          foreach ($a in $old) { gh release delete-asset $t $a -R $r --yes }
+          Write-Host "Added $zip to $t"
