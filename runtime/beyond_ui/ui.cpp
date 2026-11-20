@@ -548,7 +548,7 @@ static std::vector<Opt> build_options() {
     C("mouse_aim", "Input", "Controls", "Mouse look", LIVE_YES, "1",
       {{"1", "Camera stick"}, {"2", "Motion (1:1, needs a game setting)"}, {"0", "Off"}},
       "Click the game window to capture the mouse, Esc to let it go. Camera stick works right away. Motion follows the mouse 1:1 and is more precise, "
-      "but needs the game's Settings > Camera > Enable Motion Controls on (open the game's menu with - : Back / View on a controller, Backspace on the keyboard). "
+      "but needs the game's Settings > Camera > Enable Motion Controls on (open the game's menu with Esc, or - : Back / View on a controller). "
       "Left click shoots (ZR), right click locks on (ZL), middle click fires missiles (R).");
     I("mouse_sensitivity", "Input", "Controls", "Mouse look sensitivity", LIVE_YES, "100", 25, 400, 5, "Percent: higher turns the camera with less mouse movement.");
     C("button_icons", "Input", "Controls", "Button icons", LIVE_RESTART, "auto",

@@ -211,12 +211,12 @@ static const char* HELP=
   "F1 = menu   F3 = screenshot   F4 = FPS limit 60 / unlimited   F5 = diagnostic dump (trace)\n"
   "F7 = record .mp4 video (press F7 again to stop; saved in the recordings folder)\n"
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
-  "F11 / Alt+Enter = fullscreen   Esc = quit";
+  "F11 / Alt+Enter = fullscreen   Esc = the game's menu";
 
 static u64 keymap(WPARAM k){
   switch(k){ case 'X': case VK_SPACE: return 1ull<<0; case 'Z': return 1ull<<1; case 'C': return 1ull<<2; case 'V': return 1ull<<3;
     case 'Q': return 1ull<<6; case 'E': return 1ull<<7; case '1': return 1ull<<8; case '3': return 1ull<<9;
-    case VK_RETURN: return 1ull<<10; case VK_BACK: return 1ull<<11;
+    case VK_RETURN: return 1ull<<10; case VK_BACK: case VK_ESCAPE: return 1ull<<11;   /* -: the game's menu (Esc too) */
     case VK_LEFT: return 1ull<<12; case VK_UP: return 1ull<<13; case VK_RIGHT: return 1ull<<14; case VK_DOWN: return 1ull<<15;
     /* stick keys, turned into axes later */
     case 'A': return 1ull<<40; case 'W': return 1ull<<41; case 'D': return 1ull<<42; case 'S': return 1ull<<43;
@@ -243,8 +243,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
   case WM_KEYDOWN:
     /* a held key auto-repeats (bit 30): the one-shot actions below only fire on the first press,
        or holding F7 would start and stop the recording every frame */
-    if((l&(1<<30)) && (w==VK_ESCAPE||w==VK_F1||w==VK_F3||w==VK_F4||w==VK_F5||w==VK_F7||w==VK_F8||w==VK_F11)) return 0;
-    if(w==VK_ESCAPE){ g_quit=1; return 0; }
+    if((l&(1<<30)) && (w==VK_F1||w==VK_F3||w==VK_F4||w==VK_F5||w==VK_F7||w==VK_F8||w==VK_F11)) return 0;
+    if(w==VK_ESCAPE && g_mcap){ InterlockedExchange(&g_mcap,0); ClipCursor(NULL); }   /* Esc: the game's menu (-), and a captured mouse goes; it no longer quits */
     if(w==VK_F11){ set_fullscreen(!g_fullscreen); return 0; }
     if(w==VK_F1){ return 0; }   /* the in-game menu (ov_wndproc) */
     if(0){ MessageBoxA(h,HELP,"Metroid Prime 4 Beyond",MB_OK); }

@@ -3,7 +3,7 @@
    any copy or derived work must keep the credit to SwitchRecomp by MZ Labs. */
 /* X11 + GLX 4.3 backend, the Linux counterpart of backend_win32.c (Wayland desktops run it through
    XWayland). Controllers come from SDL2, loaded at run time like XInput on Windows.
-   F1 help  F3 screenshot  F4 fps limit  F5 trace  F8 full-res screenshot  F11/Alt+Enter fullscreen  Esc quit
+   F1 help  F3 screenshot  F4 fps limit  F5 trace  F8 full-res screenshot  F11/Alt+Enter fullscreen  Esc the game's menu
    Also what the Xvfb tests run on (screenshots, scripted input). */
 #include "rt.h"
 #include "pad_remap.h"
@@ -124,7 +124,7 @@ static void cursor_sync(void){
 /* ---- mouse look ([Input] mouse_aim, on by default). A click in the game window captures the mouse: the pointer is
    grabbed and hidden, kept at the window's centre (warped back after each move, which XWayland also turns into a
    locked pointer), and each move turns the controller (svc_hid.c hid_motion_add), so the game's motion aiming turns
-   the camera with the mouse. The buttons press the Switch buttons in mouse_buttons. Esc, F1 (the menu), switching to
+   the camera with the mouse. The buttons press the Switch buttons in mouse_buttons. Esc (also the game's menu), F1 (this port's menu), switching to
    another window or turning mouse_aim off lets the mouse go */
 static int g_mcap, g_mdx, g_mdy; static unsigned g_mbtn;   /* captured; movement since the last poll; buttons held: 1 left 2 right 4 middle 8 back 16 forward */
 static void mouse_map(void){
@@ -177,7 +177,7 @@ static const char* HELP=
   "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
   "F1 = this help   F3 = screenshot   F4 = FPS limit 60 / unlimited   F5 = diagnostic dump (trace)\n"
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
-  "F11 / Alt+Enter = fullscreen   Esc = quit";
+  "F11 / Alt+Enter = fullscreen   Esc = the game's menu";
 
 void video_init(const char* title){
   snprintf(g_title,sizeof g_title,"%s - SwitchRecomp  (F1 help)",title);
@@ -282,7 +282,7 @@ void video_present_rgba(const u32* px, int w, int h, int stride){ extern void gp
 static u64 keymap(KeySym k){
   switch(k){ case XK_x: case XK_space: return 1ull<<0; /* A */ case XK_z: return 1ull<<1; /* B */ case XK_c: return 1ull<<2; /* X */ case XK_v: return 1ull<<3; /* Y */
     case XK_q: return 1ull<<6; /* L */ case XK_e: return 1ull<<7; /* R */ case XK_1: return 1ull<<8; /* ZL */ case XK_3: return 1ull<<9; /* ZR */
-    case XK_Return: case XK_KP_Enter: return 1ull<<10; /* + */ case XK_BackSpace: return 1ull<<11; /* - */
+    case XK_Return: case XK_KP_Enter: return 1ull<<10; /* + */ case XK_BackSpace: case XK_Escape: return 1ull<<11; /* -: the game's menu */
     case XK_Left: return 1ull<<12; case XK_Up: return 1ull<<13; case XK_Right: return 1ull<<14; case XK_Down: return 1ull<<15;
     /* stick keys, turned into axes later */
     case XK_a: return 1ull<<40; case XK_w: return 1ull<<41; case XK_d: return 1ull<<42; case XK_s: return 1ull<<43;
@@ -316,7 +316,7 @@ static void key_down(XKeyEvent* e){
     return; }
   if(k==XK_Return && (e->state&Mod1Mask)){ if(once) set_fullscreen(!g_fullscreen); return; }
   switch(k){
-    case XK_Escape: if(g_mcap){ if(once) mouse_capture(0); return; } g_quit=1; return;   /* a captured mouse goes first */
+    case XK_Escape: if(g_mcap && once) mouse_capture(0); break;   /* the game's menu (-), and a captured mouse goes; it no longer quits */
     case XK_F11: if(once) set_fullscreen(!g_fullscreen); return;
     case XK_F3: if(once) g_shot_req=1; return;
     case XK_F7: if(once) LOG("F7 video recording is only available on Windows\n"); return;

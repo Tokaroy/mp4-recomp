@@ -143,8 +143,8 @@ void tab_content(int t) {
     default: {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},
-                               {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Quit", "Esc"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
-                               {"L R ZL ZR", "Q  E  1  3"}, {"+ / -", "Enter / Backspace"}};
+                               {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Game's own menu (-)", "Esc or Backspace"}, {"Quit", "QUIT GAME below, or close the window"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
+                               {"L R ZL ZR", "Q  E  1  3"}, {"+ / -", "Enter / Esc or Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
         section("ABOUT"); help_text("Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; Dear ImGui; SDL2. Full credits on the Play screen.");
     } }
